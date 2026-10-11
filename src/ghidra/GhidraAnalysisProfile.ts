@@ -227,7 +227,7 @@ export const resolveGhidraAnalysisProfile = async (
             }
           : {}),
         ...analyzerParameters,
-        ...ghidraMipsProfileParameters(target),
+        ...ghidraMipsProfileParameters(target, languageOverride),
         ...(pspExtension?.ok === true
           ? {
               mips_support_lane: "psp-elf32-exec-eabi32-allegrex-v2",
