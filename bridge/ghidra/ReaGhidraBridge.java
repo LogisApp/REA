@@ -185,7 +185,9 @@ public final class ReaGhidraBridge extends HeadlessScript {
         if (currentProgram.getExecutableFormat().equals("Raw Binary")) {
             boolean dosCom = currentProgram.getLanguageID().getIdAsString()
                 .equals("x86:LE:16:Real Mode");
-            String preparation = dosCom ? "REA DOS COM prepared" : "REA raw binary prepared";
+            String preparation = dosCom ? "REA DOS COM prepared" :
+                currentProgram.getLanguageID().getIdAsString().equals("MIPS:LE:32:default") ?
+                    "REA PS-X EXE prepared" : "REA raw binary prepared";
             if (!currentProgram.getOptions(ghidra.program.model.listing.Program.PROGRAM_INFO)
                 .getBoolean(preparation, false)) {
                 throw new IllegalStateException(

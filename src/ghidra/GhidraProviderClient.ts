@@ -470,6 +470,11 @@ export const createGhidraProviderClient = (input: {
       ? ghidraRawBinaryLanguage(target.architecture)
       : undefined;
   const targetLimitations = [
+    ...(target.format === "psx-exe"
+      ? [
+          "PS-X EXE static analysis maps the declared payload at its original address using Ghidra generic little-endian MIPS. R3000A load-delay execution, GTE/COP2 semantics, BIOS, hardware, overlays, runtime patches and cache aliases are not emulated. Pseudocode requires independent validation.",
+        ]
+      : []),
     ...(target.format === "dos-mz"
       ? [
           "DOS MZ uses 16-bit x86 real mode with the Ghidra load segment 0x1000. Returned addresses are linear byte coordinates; they do not identify a unique segment:offset alias.",
@@ -483,7 +488,9 @@ export const createGhidraProviderClient = (input: {
           "Static analysis does not emulate reset vectors, memory-mapped I/O, or firmware boot sequences.",
         ]
       : []),
-    ...(target.kind === "executable" && target.architecture === "mips"
+    ...(target.kind === "executable" &&
+    target.architecture === "mips" &&
+    target.format === "elf"
       ? (target.mips.limitations ?? [])
       : []),
   ];
@@ -510,6 +517,7 @@ export const createGhidraProviderClient = (input: {
         : {}),
       ...(target.format === "dos-mz" ? { dosMz: true } : {}),
       ...(target.format === "dos-com" ? { dosCom: true } : {}),
+      ...(target.format === "psx-exe" ? { psx: target.psx } : {}),
       ...(rawLanguage === undefined || target.format !== "raw-binary"
         ? {}
         : {
@@ -556,6 +564,12 @@ export const createGhidraProviderClient = (input: {
             expectedLanguageId: rawLanguage.languageId,
             expectedCompilerSpecId: rawLanguage.compilerSpecId,
           }),
+    ...(target.format === "psx-exe"
+      ? {
+          expectedLanguageId: "MIPS:LE:32:default",
+          expectedCompilerSpecId: "default",
+        }
+      : {}),
     ...(psp
       ? {
           expectedLanguageId: "Allegrex:LE:32:default",

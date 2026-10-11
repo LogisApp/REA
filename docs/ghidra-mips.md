@@ -110,3 +110,5 @@ delay-slot execution or complete floating-point semantics. Assertion regressions
 reject incorrect byte order, constants, destinations and loaded identities.
 Parser/profile tests are narrower checks, not substitutes for this real-provider
 run. Report the actual lanes run and leave unexecuted verification pending.
+
+For extracted original PlayStation executables, see the distinct [PS-X EXE static profile](ghidra-psx.md). It does not use ELF ABI admission.

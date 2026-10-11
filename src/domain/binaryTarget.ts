@@ -1,3 +1,4 @@
+import { parsePsxExeHeader, type PsxExeHeader } from "./psxExe.js";
 import type {
   BinaryArchitecture,
   MipsElfMetadata,
@@ -7,6 +8,12 @@ import { mzWindowsHeaderOffset, parseDosMzHeader } from "./dosMz.js";
 
 /** Format and architecture facts recovered from an executable header. */
 export type ExecutableMetadata =
+  | {
+      readonly format: "psx-exe";
+      readonly architecture: "mips";
+      readonly availableArchitectures: readonly "mips"[];
+      readonly psx: PsxExeHeader;
+    }
   | {
       readonly format: "elf";
       readonly architecture: "mips";
@@ -51,6 +58,17 @@ export const parseExecutableHeader = (
     return parseElf(bytes, fileSize);
   if (bytes.length >= 2 && bytes[0] === 0x4d && bytes[1] === 0x5a)
     return parseMz(bytes, fileSize);
+  if (bytes.subarray(0, 8).toString("ascii") === "PS-X EXE") {
+    const parsed = parsePsxExeHeader(bytes, fileSize);
+    return parsed.ok
+      ? ok({
+          format: "psx-exe",
+          architecture: "mips",
+          availableArchitectures: ["mips"],
+          psx: parsed.value,
+        })
+      : parsed;
+  }
   if (bytes.length < 8) return err("truncated or unsupported binary header");
   const magic = bytes.readUInt32BE(0);
   if ([0xfeedface, 0xfeedfacf, 0xcefaedfe, 0xcffaedfe].includes(magic))

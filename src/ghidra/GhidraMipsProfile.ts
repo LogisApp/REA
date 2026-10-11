@@ -7,6 +7,7 @@ export const ghidraMipsUnsupportedReason = (
 ): string | null => {
   if (target.kind !== "executable" || target.architecture !== "mips")
     return null;
+  if (target.format === "psx-exe") return null;
   const metadata = target.mips;
   if (target.format !== "elf" || metadata === undefined)
     return "MIPS analysis requires ELF header metadata; a family name alone does not select an ISA or ABI.";
@@ -57,6 +58,7 @@ export const ghidraMipsProfileParameters = (
   if (
     target.kind !== "executable" ||
     target.architecture !== "mips" ||
+    target.format !== "elf" ||
     target.mips === undefined
   )
     return {};
