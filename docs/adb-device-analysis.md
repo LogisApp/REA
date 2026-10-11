@@ -112,6 +112,34 @@ existing analysis families directly, for example
 - **Splits are part of the answer.** `pm path` enumerates the base APK and
   every installed split; pulls cover the whole set. System packages whose
   APKs keep other names report the `unknown` role rather than guessing.
+- **Device file names are untrusted.** A package pull writes each APK under
+  the last segment of its `pm path` device path only when that segment
+  matches `[A-Za-z0-9][A-Za-z0-9._-]*.apk`. Only the `\n`/`\r\n` line
+  terminator is stripped from each entry. Whitespace, control characters,
+  Unicode format controls (bidi overrides and isolates such as U+202E and
+  U+2066, zero-width characters such as U+200B, the U+FEFF byte-order mark),
+  surrogates, or private-use code points anywhere in the path, including
+  directory segments, fail the whole pull before any host directory is
+  created, even when the unsafe entry is the only one. So do empty names,
+  `.`/`..`, `\` separators, and reserved Windows device names (`CON`, `PRN`,
+  `AUX`, `NUL`, `COM1`-`COM9`, `LPT1`-`LPT9`, in any case and with any
+  extension, such as `NUL.apk`). Two entries whose file names differ only by
+  case or Unicode normalisation (`base.apk` and `BASE.apk`) also fail the
+  whole pull. Both checks apply on every host, not only on Windows or
+  case-insensitive volumes, so the same listing is refused the same way
+  wherever REA runs. Paths are never trimmed or renamed.
+- **Unsafe listings are diagnosable.** Both refusals return
+  `unreadable_output` with `retryable: false`, keep the `pm path` output in
+  `details.captured_output`, and name the refusal in `details.reason`:
+  `unsafe_device_path` lists every refused entry in
+  `details.diagnostics.rejected_paths` as `{device_path, file_name, reason}`
+  with `reason` one of `whitespace_or_control`, `empty_file_name`,
+  `dot_segment`, `path_separator`, `not_portable_apk_name`, or
+  `reserved_name`; `aliased_device_paths` names both colliding entries in
+  `details.diagnostics.aliased_paths` with `alias_reason`
+  `case_fold_alias` or `normalization_alias`. `device_path` is the raw
+  device string; the human-readable `message` escapes invisible code points
+  as `\u{...}` so the rendered text cannot be reordered.
 - **Partial results keep facts.** Failed individual pulls return successful
   artifacts with `coverage: "partial"` and per-file `failures`. Listings
   that contain unrecognized lines report them as `unparsed_lines` and mark

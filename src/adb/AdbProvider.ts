@@ -24,7 +24,10 @@ import {
   AnalysisTimeoutError,
   AnalysisUnsupportedTargetError,
 } from "../domain/analysisErrorCore.js";
-import { AnalysisError } from "../domain/analysisErrorBase.js";
+import {
+  AnalysisError,
+  type AnalysisCapturedOutput,
+} from "../domain/analysisErrorBase.js";
 import { analysisErrorWithCleanupFailure } from "../domain/analysisErrorCleanup.js";
 import { err, ok, type Result } from "../domain/result.js";
 import { hashStableFile } from "../filesystem/StableFileHash.js";
@@ -42,6 +45,10 @@ import {
   type AdbClientIdentity,
 } from "./AdbConfiguration.js";
 import {
+  displayDevicePath,
+  findAliasedPackagePaths,
+  type AdbAliasedPackagePaths,
+  type AdbRejectedPackagePath,
   parseAdbDevicesOutput,
   parseGetpropOutput,
   parsePackageListOutput,
@@ -323,6 +330,57 @@ const prepareOutputDirectory = async (
   }
   return ok(root);
 };
+
+const PM_PATH_REFUSAL_REMEDIATION =
+  "Review details.diagnostics for the refused device paths and details.captured_output for the retained pm path output. REA never trims or renames device-reported APK paths, so retrying against the same device state is refused the same way.";
+
+/** `pm path` reported APK paths that cannot be used as host file names. */
+const unsafePackagePathsError = (
+  operation: string,
+  packageName: string,
+  rejected: readonly [AdbRejectedPackagePath, ...AdbRejectedPackagePath[]],
+  capturedOutput: AnalysisCapturedOutput,
+): AnalysisOutputError => {
+  const [first] = rejected;
+  const others =
+    rejected.length === 1
+      ? ""
+      : ` and ${String(rejected.length - 1)} other path(s)`;
+  return new AnalysisOutputError(operation, "unsafe_device_path", {
+    capturedOutput,
+    userMessage: `pm path for ${packageName} reported an APK path REA cannot use as a host file name: ${displayDevicePath(first.device_path)} (${first.reason})${others}. No APK was pulled.`,
+    remediationAction: PM_PATH_REFUSAL_REMEDIATION,
+    diagnostics: {
+      package_name: packageName,
+      rejected_paths: rejected.map((entry) => ({
+        device_path: entry.device_path,
+        file_name: entry.file_name,
+        reason: entry.reason,
+      })),
+    },
+  });
+};
+
+/** `pm path` reported two APK names that would alias one host file. */
+const aliasedPackagePathsError = (
+  operation: string,
+  packageName: string,
+  aliased: AdbAliasedPackagePaths,
+  capturedOutput: AnalysisCapturedOutput,
+): AnalysisOutputError =>
+  new AnalysisOutputError(operation, "aliased_device_paths", {
+    capturedOutput,
+    userMessage: `pm path for ${packageName} reported APK paths whose file names collide on case-insensitive or normalising host filesystems: ${displayDevicePath(aliased.first.device_path)} and ${displayDevicePath(aliased.second.device_path)} (${aliased.reason}). No APK was pulled.`,
+    remediationAction: PM_PATH_REFUSAL_REMEDIATION,
+    diagnostics: {
+      package_name: packageName,
+      alias_reason: aliased.reason,
+      aliased_paths: [aliased.first, aliased.second].map((entry) => ({
+        device_path: entry.device_path,
+        file_name: entry.file_name,
+      })),
+    },
+  });
 
 const refuseExistingTarget = async (
   operation: string,
@@ -1157,6 +1215,38 @@ export class AdbProvider {
     );
     if (!paths.ok) return paths;
     const parsed = parsePmPathOutput(paths.value.stdout);
+    const capturedOutput = {
+      stdout: paths.value.stdout,
+      stderr: paths.value.stderr,
+      truncated: false,
+    };
+    // Rejected paths win over the empty/unparsed checks: a listing whose only
+    // entry is unsafe is hostile output, not package absence, and the error
+    // must carry the raw paths, their reasons, and the captured output.
+    const rejected = parsed.rejectedPaths[0];
+    if (rejected !== undefined)
+      return err(
+        unsafePackagePathsError(
+          operation,
+          packageName,
+          [rejected, ...parsed.rejectedPaths.slice(1)],
+          capturedOutput,
+        ),
+      );
+    // Names that differ only by case or Unicode normalisation resolve to one
+    // file on case-insensitive or normalising destinations, so the second pull
+    // would replace bytes already digested for the first. Refuse the listing on
+    // every host, before any filesystem effect, so the outcome is reproducible.
+    const aliased = findAliasedPackagePaths(parsed.paths);
+    if (aliased !== undefined)
+      return err(
+        aliasedPackagePathsError(
+          operation,
+          packageName,
+          aliased,
+          capturedOutput,
+        ),
+      );
     if (parsed.paths.length === 0 && parsed.unparsedLines.length === 0)
       return err(
         new AnalysisUnsupportedTargetError(

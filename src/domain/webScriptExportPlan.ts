@@ -4,11 +4,11 @@ import type {
   CapturedWebScript,
   ExportedWebScript,
 } from "./webScriptExport.js";
+import { isWindowsReservedFileName } from "./windowsReservedFileName.js";
 
 const hash = (text: string): string =>
   createHash("sha256").update(text).digest("hex");
 const PORTABLE_SEGMENT = /^[A-Za-z0-9_~.-]+$/u;
-const RESERVED_SEGMENT = /^(?:con|prn|aux|nul|com[1-9]|lpt[1-9])(?:\.|$)/iu;
 
 /** One planned file, or an explicit missing source with no filesystem effect. */
 export interface PlannedWebScript {
@@ -85,7 +85,7 @@ const candidatePath = (script: CapturedWebScript): CandidatePath => {
         part === "." ||
         part === ".." ||
         part.endsWith(".") ||
-        RESERVED_SEGMENT.test(part),
+        isWindowsReservedFileName(part),
     )
   )
     return {

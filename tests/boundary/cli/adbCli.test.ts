@@ -1,5 +1,8 @@
+import { lstat } from "node:fs/promises";
+import { join } from "node:path";
 import { expect, it } from "vitest";
 
+import { writeFakeAdbPmPath } from "../../fixtures/fakeAdb.js";
 import { serveCli as serve } from "./cliServeHarness.js";
 
 it.each([
@@ -56,3 +59,81 @@ it("requires the output directory option on pull", async () => {
   ]);
   expect(result.exitCode).not.toBe(0);
 });
+
+const posixIt = it.skipIf(process.platform === "win32");
+
+const pullHostilePackage = async (devicePaths: readonly string[]) => {
+  const adb = await writeFakeAdbPmPath(devicePaths);
+  const output = join(adb.root, "pulls");
+  const result = await serve(
+    [
+      "pull-adb-package",
+      "emulator-5554",
+      "com.hostile",
+      "--output-directory",
+      output,
+      "--json",
+    ],
+    { REA_ADB_PATH: adb.binary },
+  );
+  await expect(lstat(adb.pullLog)).rejects.toThrow(/ENOENT/u);
+  await expect(lstat(output)).rejects.toThrow(/ENOENT/u);
+  return JSON.parse(result.stdout) as Record<string, unknown>;
+};
+
+posixIt(
+  "projects the unsafe pm path entry and its reason to CLI callers",
+  async () => {
+    const hostile = "/data/\u202eppa/x/base.apk";
+    const projected = await pullHostilePackage([
+      "/data/app/x/base.apk",
+      hostile,
+    ]);
+    expect(projected).toMatchObject({
+      code: "unreadable_output",
+      retryable: false,
+      details: {
+        operation: "pull_adb_package",
+        reason: "unsafe_device_path",
+        diagnostics: {
+          package_name: "com.hostile",
+          rejected_paths: [
+            {
+              device_path: hostile,
+              file_name: "base.apk",
+              reason: "whitespace_or_control",
+            },
+          ],
+        },
+        captured_output: {
+          stdout: expect.stringContaining(hostile) as unknown,
+        },
+      },
+    });
+    expect(projected.message).toContain("\\u{202E}");
+    expect(projected.message).not.toContain("rea doctor");
+  },
+);
+
+posixIt(
+  "projects both case-folded pm path entries to CLI callers",
+  async () => {
+    const projected = await pullHostilePackage([
+      "/data/app/x/base.apk",
+      "/data/app/y/BASE.apk",
+    ]);
+    expect(projected).toMatchObject({
+      code: "unreadable_output",
+      details: {
+        reason: "aliased_device_paths",
+        diagnostics: {
+          alias_reason: "case_fold_alias",
+          aliased_paths: [
+            { device_path: "/data/app/x/base.apk", file_name: "base.apk" },
+            { device_path: "/data/app/y/BASE.apk", file_name: "BASE.apk" },
+          ],
+        },
+      },
+    });
+  },
+);

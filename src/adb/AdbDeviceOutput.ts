@@ -6,6 +6,8 @@
  * their evidence basis.
  */
 
+import { isWindowsReservedFileName } from "../domain/windowsReservedFileName.js";
+
 /** One device exactly as `adb devices -l` reports it. */
 export interface AdbDeviceEntry {
   readonly serial: string;
@@ -211,28 +213,159 @@ const fileNameOf = (devicePath: string): string => {
 };
 
 /**
+ * Host file names REA writes pulled APKs under. Package Manager names APKs
+ * `base.apk`, `split_*.apk`, or a system module name; anything else, including
+ * dot segments, separators, and control characters, could escape or alias the
+ * package output directory when joined on the host. Names matching this
+ * pattern are further refused when they are reserved Windows device names
+ * (`NUL.apk`, `com1.apk`) or alias another entry under case folding.
+ */
+const SAFE_HOST_APK_FILE_NAME = /^[A-Za-z0-9][A-Za-z0-9._-]*\.apk$/u;
+
+/**
+ * Whitespace and invisible or non-text code points anywhere in a device path:
+ * `\s`, control characters (`Cc`), format controls (`Cf`: bidi overrides and
+ * isolates such as U+202E and U+2066, zero-width characters such as U+200B,
+ * and the U+FEFF byte-order mark), lone surrogates (`Cs`), and private-use
+ * code points (`Co`). Package Manager never emits them, and each one makes
+ * the retained path differ from what a trimmed or terminal-rendered copy
+ * shows, or lets a renderer reorder the path. This is the only check applied
+ * to directory segments, which REA never writes on the host; the final
+ * segment must also match the ASCII-only {@link SAFE_HOST_APK_FILE_NAME},
+ * like the portable-segment rule in `webScriptExportPlan.ts`.
+ */
+const DEVICE_PATH_INVISIBLE_OR_CONTROL = /[\s\p{Cc}\p{Cf}\p{Cs}\p{Co}]/u;
+
+/**
+ * Quote a raw device path for caller-facing prose. JSON quoting escapes C0
+ * controls; every other control, format, surrogate, private-use, or non-space
+ * separator code point is escaped as `\u{...}` so a bidi override cannot
+ * reorder the rendered message. Structured details keep the raw path.
+ */
+export const displayDevicePath = (devicePath: string): string =>
+  JSON.stringify(devicePath).replace(/[\p{C}\p{Z}]/gu, (char) =>
+    char === " "
+      ? char
+      : `\\u{${char.codePointAt(0)!.toString(16).toUpperCase()}}`,
+  );
+
+/** Stable reason a device-reported APK path cannot be used on the host. */
+export type AdbUnsafeDevicePathReason =
+  | "whitespace_or_control"
+  | "empty_file_name"
+  | "dot_segment"
+  | "path_separator"
+  | "not_portable_apk_name"
+  | "reserved_name";
+
+/** Why a device-reported APK path cannot be pulled under a host file name. */
+const unsafeDevicePathReason = (
+  devicePath: string,
+  fileName: string,
+): AdbUnsafeDevicePathReason | undefined => {
+  if (DEVICE_PATH_INVISIBLE_OR_CONTROL.test(devicePath))
+    return "whitespace_or_control";
+  if (fileName === "") return "empty_file_name";
+  if (fileName === "." || fileName === "..") return "dot_segment";
+  if (fileName.includes("\\")) return "path_separator";
+  if (!SAFE_HOST_APK_FILE_NAME.test(fileName)) return "not_portable_apk_name";
+  if (isWindowsReservedFileName(fileName)) return "reserved_name";
+  return undefined;
+};
+
+/**
+ * Host-independent collision key for a pulled APK file name. Case-insensitive
+ * destinations (Windows, default macOS volumes) and normalising filesystems
+ * resolve names that differ only by case or Unicode normalisation to one file,
+ * so the key folds both. The fold is applied on every host on purpose: the
+ * same listing must be refused the same way wherever REA runs, so the evidence
+ * stays reproducible instead of depending on the destination filesystem.
+ */
+const hostFileNameKey = (fileName: string): string =>
+  fileName.normalize("NFKC").toUpperCase().toLowerCase().normalize("NFKC");
+
+/** Two `pm path` entries whose distinct file names would alias one host file. */
+export interface AdbAliasedPackagePaths {
+  readonly first: AdbPackagePathEntry;
+  readonly second: AdbPackagePathEntry;
+  /** `case_fold_alias` when the names differ only by case, otherwise by normalisation. */
+  readonly reason: "case_fold_alias" | "normalization_alias";
+}
+
+/**
+ * Find the first pair of entries whose file names differ as strings but are
+ * equal under case folding or NFC/NFKC normalisation. Exact repeats are not
+ * aliases: the pull loop already refuses to overwrite those by string identity.
+ */
+export const findAliasedPackagePaths = (
+  paths: readonly AdbPackagePathEntry[],
+): AdbAliasedPackagePaths | undefined => {
+  const seen = new Map<string, AdbPackagePathEntry>();
+  for (const entry of paths) {
+    const key = hostFileNameKey(entry.file_name);
+    const earlier = seen.get(key);
+    if (earlier === undefined) {
+      seen.set(key, entry);
+      continue;
+    }
+    if (earlier.file_name !== entry.file_name)
+      return {
+        first: earlier,
+        second: entry,
+        reason:
+          earlier.file_name.toLowerCase() === entry.file_name.toLowerCase()
+            ? "case_fold_alias"
+            : "normalization_alias",
+      };
+  }
+  return undefined;
+};
+
+/** One `pm path` APK whose file name REA refuses to use on the host. */
+export interface AdbRejectedPackagePath {
+  /** Raw device path exactly as Package Manager reported it. */
+  readonly device_path: string;
+  readonly file_name: string;
+  readonly reason: AdbUnsafeDevicePathReason;
+}
+
+/**
  * Parse `pm path PACKAGE` lines. The base/split role is derived from the file
  * name (`base.apk`, `split_*.apk`), which is the only signal the output
- * carries; any other name reports an unknown role.
+ * carries; any other name reports an unknown role. Only the protocol line
+ * terminator (`\n` or `\r\n`) is stripped, so each retained device path is
+ * byte-for-byte what the device reported. Paths with whitespace, control,
+ * format, surrogate, or private-use code points, and file names that are not safe host file names, are reported
+ * in `rejectedPaths` with that raw device path, never trimmed or renamed.
  */
 export const parsePmPathOutput = (
   stdout: string,
 ): {
   paths: readonly AdbPackagePathEntry[];
+  rejectedPaths: readonly AdbRejectedPackagePath[];
   unparsedLines: readonly string[];
 } => {
   const paths: AdbPackagePathEntry[] = [];
+  const rejectedPaths: AdbRejectedPackagePath[] = [];
   const unparsedLines: string[] = [];
-  for (const rawLine of stdout.split(/\r?\n/u)) {
-    const line = rawLine.trim();
-    if (line === "") continue;
-    const match = /^package:(\S+)$/u.exec(line);
+  for (const line of stdout.split(/\r?\n/u)) {
+    if (line.trim() === "") continue;
+    const match = /^package:(.+)$/su.exec(line);
     if (match === null) {
       unparsedLines.push(line);
       continue;
     }
     const devicePath = match[1]!;
     const fileName = fileNameOf(devicePath);
+    const unsafe = unsafeDevicePathReason(devicePath, fileName);
+    if (unsafe !== undefined) {
+      rejectedPaths.push({
+        device_path: devicePath,
+        file_name: fileName,
+        reason: unsafe,
+      });
+      continue;
+    }
     paths.push({
       device_path: devicePath,
       file_name: fileName,
@@ -244,5 +377,5 @@ export const parsePmPathOutput = (
             : "unknown",
     });
   }
-  return { paths, unparsedLines };
+  return { paths, rejectedPaths, unparsedLines };
 };

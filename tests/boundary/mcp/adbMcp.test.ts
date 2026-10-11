@@ -1,12 +1,16 @@
+import { lstat } from "node:fs/promises";
+import { join } from "node:path";
 import { Client, InMemoryTransport } from "@modelcontextprotocol/client";
 import { expect, it, onTestFinished } from "vitest";
 
 import type { AdbDeviceAnalysisPort } from "../../../src/application/adb/AdbDeviceAnalysisPort.js";
 import { createAnalysisExecution } from "../../../src/application/AnalysisProvider.js";
+import { createAdbDeviceAnalysisProvider } from "../../../src/composition/adb.js";
 import { parseEvidence } from "../../../src/domain/evidence.js";
 import { ok } from "../../../src/domain/result.js";
 import { createServer } from "../../../src/server/createServer.js";
 import { createTestBinarySession } from "../../fixtures/binarySession.js";
+import { writeFakeAdbPmPath } from "../../fixtures/fakeAdb.js";
 import { assertAdvertisedMcpContracts } from "./mcpContractHarness.js";
 
 const identity = { id: "adb", name: "Android Debug Bridge", version: null };
@@ -379,3 +383,111 @@ it("rejects invalid tool input before reaching the provider", async () => {
     .join("");
   expect(text).toContain("Invalid arguments for tool inspect_adb_device");
 });
+
+const posixIt = it.skipIf(process.platform === "win32");
+
+const pullThroughMcp = async (devicePaths: readonly string[]) => {
+  const adb = await writeFakeAdbPmPath(devicePaths);
+  const provider = createAdbDeviceAnalysisProvider({
+    REA_ADB_PATH: adb.binary,
+  });
+  const server = createServer(
+    {
+      kind: "session",
+      session: createTestBinarySession(() => {
+        throw new Error("must not start");
+      }),
+    },
+    { adbDeviceAnalysis: provider },
+  );
+  onTestFinished(() => server.close());
+  const [clientTransport, serverTransport] =
+    InMemoryTransport.createLinkedPair();
+  await server.connect(serverTransport);
+  const client = new Client({ name: "adb-boundary-pm-path", version: "0.0.0" });
+  onTestFinished(() => client.close());
+  await client.connect(clientTransport);
+  const output = join(adb.root, "pulls");
+  const refused = await client.callTool({
+    name: "pull_adb_package",
+    arguments: {
+      serial: "emulator-5554",
+      package: "com.hostile",
+      output_directory: output,
+    },
+  });
+  expect(refused.isError).toBe(true);
+  await expect(lstat(adb.pullLog)).rejects.toThrow(/ENOENT/u);
+  await expect(lstat(output)).rejects.toThrow(/ENOENT/u);
+  const text = (refused.content as { readonly text?: string }[])
+    .map((part) => part.text ?? "")
+    .join("");
+  return (JSON.parse(text) as { readonly error: Record<string, unknown> })
+    .error;
+};
+
+posixIt(
+  "projects unsafe pm path entries and their reasons to MCP callers",
+  async () => {
+    const projected = await pullThroughMcp([
+      "/data/app/x/base.apk",
+      "/data/app/x/..",
+      "/data/app/x/base\u200b.apk",
+    ]);
+    expect(projected).toMatchObject({
+      code: "unreadable_output",
+      retryable: false,
+      details: {
+        operation: "pull_adb_package",
+        reason: "unsafe_device_path",
+        diagnostics: {
+          package_name: "com.hostile",
+          rejected_paths: [
+            {
+              device_path: "/data/app/x/..",
+              file_name: "..",
+              reason: "dot_segment",
+            },
+            {
+              device_path: "/data/app/x/base\u200b.apk",
+              file_name: "base\u200b.apk",
+              reason: "whitespace_or_control",
+            },
+          ],
+        },
+        captured_output: {
+          stdout: expect.stringContaining("package:/data/app/x/..") as unknown,
+        },
+      },
+    });
+    expect(projected.message).toContain('"/data/app/x/.."');
+    expect(projected.message).toContain("dot_segment");
+    expect(projected.message).not.toContain("rea doctor");
+  },
+);
+
+posixIt(
+  "projects both case-folded pm path entries to MCP callers",
+  async () => {
+    const projected = await pullThroughMcp([
+      "/data/app/x/base.apk",
+      "/data/app/y/BASE.apk",
+    ]);
+    expect(projected).toMatchObject({
+      code: "unreadable_output",
+      details: {
+        operation: "pull_adb_package",
+        reason: "aliased_device_paths",
+        diagnostics: {
+          package_name: "com.hostile",
+          alias_reason: "case_fold_alias",
+          aliased_paths: [
+            { device_path: "/data/app/x/base.apk", file_name: "base.apk" },
+            { device_path: "/data/app/y/BASE.apk", file_name: "BASE.apk" },
+          ],
+        },
+      },
+    });
+    expect(projected.message).toContain('"/data/app/y/BASE.apk"');
+  },
+);
