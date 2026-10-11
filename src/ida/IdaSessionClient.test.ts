@@ -435,7 +435,7 @@ describe("headless IDA transient busy health", () => {
   });
 
   it.each([
-    ["free-form text", "token=abc123 /private/home/user secret"],
+    ["free-form text", "token=abc123 /private<home> secret"],
     ["an over-long name", "x".repeat(200)],
   ])(
     "reports %s from the worker as unknown instead of echoing it",
@@ -824,7 +824,49 @@ describe("IDA #551 reaped worker lifecycle", () => {
     expect(await readdir(root)).toEqual(["target.elf"]);
     expect((await client.close()).ok).toBe(true);
   });
+});
 
+describe("IDA #551 busy release retries", () => {
+  it.each([
+    ["active worker RPC", "Session busy with active worker calls"],
+    ["another close already running", "Session release in progress"],
+    [
+      "another owned worker using the input",
+      "Worker release blocked: input still in use",
+    ],
+    ["original worker still running", "Worker termination unconfirmed"],
+  ] as const)(
+    "retains private input on %s until release is verified on retry",
+    async (_case, upstreamError) => {
+      const { producer, client, root } = await reapedWorker(false);
+      let blocked = true;
+      producer.overrideCall = ((original) => (name, args) => {
+        if (name === "idb_close" && blocked)
+          return { error: `Failed to close session: ${upstreamError}` };
+        return original(name, args);
+      })(producer.overrideCall!);
+
+      const first = await client.close();
+      expect(first.ok).toBe(false);
+      if (!first.ok) expect(first.error.cleanupIncomplete).toBe(true);
+      expect(producer.closes).toBe(0);
+      expect(producer.database).toBeDefined();
+      expect(
+        (await readdir(root)).some((name) => name.startsWith("rea-ida-")),
+      ).toBe(true);
+
+      blocked = false;
+      expect((await client.close()).ok).toBe(true);
+      expect(
+        producer.calls.filter(({ name }) => name === "idb_close"),
+      ).toHaveLength(2);
+      expect(producer.closes).toBe(1);
+      expect(await readdir(root)).toEqual(["target.elf"]);
+    },
+  );
+});
+
+describe("IDA #551 strict inventory during release", () => {
   it("preserves normal #551 live-worker close and save=false", async () => {
     const { producer, client, root, inputPath, sessionId } =
       await reapedWorker(false);
@@ -859,6 +901,70 @@ describe("IDA #551 reaped worker lifecycle", () => {
       producer.calls.filter(({ name }) => name === "idb_close"),
     ).toHaveLength(1);
     expect(producer.closes).toBe(1);
+    expect(await readdir(root)).toEqual(["target.elf"]);
+  });
+
+  it("keeps the original release token if initial strict discovery rejects a pending owned worker", async () => {
+    const { producer, client, root } = await fixture("headless");
+    let sessionId: string | undefined;
+    let privateInput: string | undefined;
+    let firstInventory = true;
+    producer.overrideCall = (name, args) => {
+      if (name === "idb_open") {
+        sessionId = z.string().parse(args.preferred_session_id);
+        privateInput = z.string().parse(args.input_path);
+        producer.database = sessionId;
+        producer.inputPath = privateInput;
+        return {
+          success: true,
+          session: {
+            session_id: sessionId,
+            input_path: privateInput,
+            release_id: openGeneration,
+          },
+        };
+      }
+      if (name === "idb_list" && firstInventory) {
+        firstInventory = false;
+        return {
+          error:
+            "Failed to list sessions: Instance discovery incomplete: unverified opening worker",
+        };
+      }
+      if (name === "idb_close") {
+        if (!sessionId || !privateInput)
+          throw new Error("Unexpected close without original owned open");
+        producer.database = undefined;
+        return {
+          success: true,
+          session_id: sessionId,
+          saved: null,
+          owned: true,
+          backend: "worker",
+          release: {
+            status: "terminated",
+            verified: true,
+            session_id: sessionId,
+            input_path: privateInput,
+            release_id: openGeneration,
+            backend: "worker",
+            owned: true,
+            worker_pid: 4242,
+            exit_code: -9,
+          },
+        };
+      }
+      return undefined;
+    };
+
+    expect((await client.execute("health", {})).ok).toBe(false);
+    expect((await client.close()).ok).toBe(true);
+    expect(
+      producer.calls.find(({ name }) => name === "idb_close")?.args,
+    ).toMatchObject({
+      save: false,
+      release_id: openGeneration,
+    });
     expect(await readdir(root)).toEqual(["target.elf"]);
   });
 });
