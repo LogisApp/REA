@@ -197,6 +197,7 @@ const runElectronTool = async <Input>(
               result.error,
               partial.evidence_id,
               recorded,
+              contract.returnsTargetContent,
             );
         }
         return options.delivery.toCallToolResult(result, contract);
