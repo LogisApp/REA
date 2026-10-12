@@ -46,5 +46,7 @@ export const estimateJavaScriptStaticApplicationProjection = (
       2;
   }
   const metadataBytes = 2048 + Buffer.byteLength(sourcePath) * 4;
-  return (checkpointBytes * 4 + repeatedBytes + records * metadataBytes) * 8;
+  // Measured on a complete Grok Bot app.asar analysis: the sum of these
+  // forecasts was 89 MB for 73 MB of retained application-graph objects.
+  return checkpointBytes * 4 + repeatedBytes + records * metadataBytes;
 };
