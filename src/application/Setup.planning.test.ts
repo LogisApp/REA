@@ -152,6 +152,9 @@ describe("setup workflow", () => {
     expect(result.plannedActions.map(({ id }) => id)).toEqual([
       "configure_client:codex",
     ]);
+    expect(result.plannedActions[0]?.detail).toContain(
+      "replaced when that entry is remote",
+    );
     expect(host.hopperInstalls).toBe(0);
     expect(host.configurations).toBe(0);
   });
