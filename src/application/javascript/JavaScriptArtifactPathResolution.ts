@@ -309,9 +309,12 @@ const enclosingPackageMetadata = (
 };
 
 /**
- * Resolve an exact `#alias` against the importer's enclosing `imports` map.
- * Selected relative targets are exact files; patterns, recursive aliases, and
- * external-package targets stay unresolved without falling through.
+ * Resolve an exact or pattern `#alias` against the importer's enclosing
+ * `imports` map. Exact keys win; single-`*` pattern keys capture their
+ * enclosed substring for target substitution with the same revalidation as
+ * exports patterns. Selected targets are package-local `./` files with no
+ * extension or index fallback; recursive aliases and external-package targets
+ * stay unresolved without falling through.
  */
 const resolvePackageImportAlias = (
   input: ResolveArtifactPathInput,
@@ -970,20 +973,27 @@ const invalidExportTarget = (
 
 // Node checks raw target segments before URL normalization. Compare encoded
 // segment names here; full URL decoding follows array target selection.
+const decodedSegmentIsForbidden = (raw: string): boolean => {
+  const segment = raw.replace(/%[0-9a-f]{2}/giu, (encoded) =>
+    String.fromCharCode(Number.parseInt(encoded.slice(1), 16)),
+  );
+  return (
+    segment === "." ||
+    segment === ".." ||
+    segment.toLowerCase() === "node_modules"
+  );
+};
+
 const forbiddenExportSegment = (value: string): string | undefined =>
   value
     .slice(2)
     .split(/[\\/]/u)
-    .find((raw) => {
-      const segment = raw.replace(/%[0-9a-f]{2}/giu, (encoded) =>
-        String.fromCharCode(Number.parseInt(encoded.slice(1), 16)),
-      );
-      return (
-        segment === "." ||
-        segment === ".." ||
-        segment.toLowerCase() === "node_modules"
-      );
-    });
+    .find((raw) => decodedSegmentIsForbidden(raw));
+
+// Node rejects a forbidden segment in the captured subpath itself, whether or
+// not the selected target interpolates the `*`.
+const forbiddenCapturedSegment = (capture: string): string | undefined =>
+  capture.split("/").find((raw) => decodedSegmentIsForbidden(raw));
 
 const selectStringPackageTarget = (
   value: string,
@@ -1029,6 +1039,10 @@ const selectStringPackageTarget = (
  * Substitute a pattern capture into a selected string target, then validate
  * the expanded string through the exact-target pipeline so a capture escaping
  * the package (`../`, `node_modules`) is refused like any declared target.
+ * The capture is validated on its own as well, because Node rejects a
+ * forbidden captured segment even when the target never interpolates it, and
+ * the replacer function keeps `$` sequences in the capture literal instead
+ * of interpreting them as replacement patterns.
  */
 const expandPatternString = (
   value: string,
@@ -1039,8 +1053,14 @@ const expandPatternString = (
   | { readonly kind: "value"; readonly value: string; readonly url: URL }
   | { readonly kind: "non-relative"; readonly value: string }
   | { readonly kind: "invalid"; readonly limitation: string } => {
+  const forbidden = forbiddenCapturedSegment(capture);
+  if (forbidden !== undefined)
+    return {
+      kind: "invalid",
+      limitation: `The package ${mapKind === "imports" ? "import" : "exports"} pattern capture ${JSON.stringify(capture)} contains forbidden path segment ${JSON.stringify(forbidden)} before URL normalization.`,
+    };
   const expanded = selectStringPackageTarget(
-    value.replaceAll("*", capture),
+    value.replaceAll("*", () => capture),
     packageUrl,
     mapKind,
   );

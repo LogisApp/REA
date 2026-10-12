@@ -2012,6 +2012,128 @@ describe("package exports pattern safety", () => {
   });
 });
 
+describe("package exports pattern captures", () => {
+  it("keeps dollar sequences in the capture literal", () => {
+    const files = fileMap([
+      file("app/src/consumer.js", "root"),
+      file(
+        "app/node_modules/fixture/package.json",
+        "root",
+        JSON.stringify({ exports: { "./*": "./src/*.js" } }),
+      ),
+      file("app/node_modules/fixture/src/dollar/$&.js", "root"),
+    ]);
+    expect(
+      resolve({
+        declaredPath: "fixture/dollar/$&",
+        sourcePath: "app/src/consumer.js",
+        context: "module-specifier",
+        moduleKind: "require",
+        files,
+      }),
+    ).toMatchObject({
+      resolution_status: "resolved",
+      resolved_path: "app/node_modules/fixture/src/dollar/$&.js",
+    });
+  });
+
+  it("refuses a forbidden capture even when the target has no star", () => {
+    const files = fileMap([
+      file("app/src/consumer.js", "root"),
+      file(
+        "app/node_modules/fixture/package.json",
+        "root",
+        JSON.stringify({ exports: { "./nostar/*": "./src/safe.js" } }),
+      ),
+      file("app/node_modules/fixture/src/safe.js", "root"),
+    ]);
+    expect(
+      resolve({
+        declaredPath: "fixture/nostar/node_modules/x",
+        sourcePath: "app/src/consumer.js",
+        context: "module-specifier",
+        moduleKind: "require",
+        files,
+      }),
+    ).toMatchObject({
+      resolution_status: "rejected",
+      resolved_path: null,
+      limitations: [expect.stringContaining("pattern capture")],
+    });
+  });
+
+  it("does not match a pattern key with an empty capture", () => {
+    const files = fileMap([
+      file("app/src/consumer.js", "root"),
+      file(
+        "app/node_modules/fixture/package.json",
+        "root",
+        JSON.stringify({
+          exports: { "./empty*.js": "./src/empty/.js", "./*": "./dist/*.js" },
+        }),
+      ),
+      file("app/node_modules/fixture/dist/empty.js.js", "root"),
+    ]);
+    expect(
+      resolve({
+        declaredPath: "fixture/empty.js",
+        sourcePath: "app/src/consumer.js",
+        context: "module-specifier",
+        moduleKind: "require",
+        files,
+      }),
+    ).toMatchObject({
+      resolution_status: "resolved",
+      resolved_path: "app/node_modules/fixture/dist/empty.js.js",
+    });
+  });
+});
+
+describe("package import alias pattern captures", () => {
+  it("keeps dollar sequences in the capture literal", () => {
+    const files = aliasFiles({
+      "package.json": JSON.stringify({
+        imports: { "#dollar/*": "./src/dollar/*.js" },
+      }),
+      "main.js": "",
+      "src/dollar/$&.js": "",
+    });
+    const outcome = resolve({
+      declaredPath: "#dollar/$&",
+      sourcePath: "main.js",
+      context: "module-specifier",
+      moduleKind: "import",
+      files,
+    });
+    expect(outcome).toMatchObject({
+      resolution_status: "resolved",
+      resolved_path: "src/dollar/$&.js",
+    });
+  });
+
+  it("refuses a forbidden capture even when the target has no star", () => {
+    const files = aliasFiles({
+      "package.json": JSON.stringify({
+        imports: { "#nostar/*": "./src/safe.mjs" },
+      }),
+      "main.js": "",
+      "src/safe.mjs": "",
+    });
+    const outcome = resolve({
+      declaredPath: "#nostar/node_modules/x",
+      sourcePath: "main.js",
+      context: "module-specifier",
+      moduleKind: "import",
+      files,
+    });
+    expect(outcome).toMatchObject({
+      resolution_status: "rejected",
+      resolved_path: null,
+      limitations: [expect.stringContaining("pattern capture")],
+    });
+  });
+});
+
 const resolve = (input: ResolveArtifactPathInput) =>
   resolveArtifactPathByContext(input);
 

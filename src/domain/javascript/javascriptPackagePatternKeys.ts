@@ -19,8 +19,8 @@ export const isSingleStarPatternKey = (key: string): boolean =>
 /**
  * Match one request against pattern keys in Node's pattern-key order. Requests
  * containing `*` or ending in "/" never match, so a pattern key can never
- * match itself or stand in for the deprecated directory form. The captured
- * substring may be empty when prefix and suffix already cover the request.
+ * match itself or stand in for the deprecated directory form. The capture
+ * must consume at least one character, as in Node's `(.+)` pattern match.
  */
 export const matchPackagePatternKey = (
   keys: readonly string[],
@@ -39,7 +39,7 @@ export const matchPackagePatternKey = (
   );
   for (const { key, prefix, suffix } of patterns) {
     if (!request.startsWith(prefix) || !request.endsWith(suffix)) continue;
-    if (request.length < prefix.length + suffix.length) continue;
+    if (request.length <= prefix.length + suffix.length) continue;
     return {
       key,
       capture: request.slice(prefix.length, request.length - suffix.length),

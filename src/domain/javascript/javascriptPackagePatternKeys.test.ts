@@ -27,11 +27,8 @@ describe("package pattern key matching", () => {
     ).toEqual({ key: "./internal/*.mjs", capture: "db" });
   });
 
-  it("allows an empty capture when prefix and suffix cover the request", () => {
-    expect(matchPackagePatternKey(["./feature*"], "./feature")).toEqual({
-      key: "./feature*",
-      capture: "",
-    });
+  it("requires the capture to consume at least one character", () => {
+    expect(matchPackagePatternKey(["./feature*"], "./feature")).toBeNull();
   });
 
   it("prefers the pattern key with the longest prefix", () => {
