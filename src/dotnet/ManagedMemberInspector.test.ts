@@ -11,8 +11,22 @@ import { comparisonLimitations } from "../domain/managed/managedMemberComparison
 import {
   buildManagedPeFixture,
   buildNativePeFixture,
+  fixtureUserStringHeap,
   managedPeFixtureTarget,
 } from "./ManagedPe.fixture.js";
+
+/** A tiny-header body that loads each `ldstr` token, discards it, and returns. */
+const ldstrBody = (tokens: readonly string[]): Buffer => {
+  const il = Buffer.concat([
+    ...tokens.map((token) => {
+      const instruction = Buffer.from([0x72, 0, 0, 0, 0, 0x26]);
+      instruction.writeUInt32LE(Number.parseInt(token, 16), 1);
+      return instruction;
+    }),
+    Buffer.from([0x2a]),
+  ]);
+  return Buffer.concat([Buffer.from([(il.length << 2) | 2]), il]);
+};
 
 describe("managed member inspection", () => {
   it("keeps metadata handles distinct from calls and field accesses", () => {
@@ -244,6 +258,94 @@ describe("managed exported types", () => {
         },
       ],
     });
+  });
+});
+
+describe("managed user strings", () => {
+  const inspect = (options: Parameters<typeof buildManagedPeFixture>[0]) => {
+    const bytes = buildManagedPeFixture(options);
+    return inspectManagedMembersBytes(bytes, managedPeFixtureTarget(bytes));
+  };
+
+  it("decodes each loaded literal once, in token order, without changing CIL tokens", () => {
+    const { heap, tokens } = fixtureUserStringHeap([
+      "quicksave.peak",
+      "unused",
+      "Ünïcødé 𝄞",
+      "\ud800",
+    ]);
+    const [path, , unicode, lone] = tokens as [string, string, string, string];
+    const ilBody = ldstrBody([unicode, path, lone, path]);
+    const result = inspect({ ilBody, userStringHeap: heap });
+
+    expect(result.user_strings).toEqual([
+      { token: path, offset: expect.any(Number), value: "quicksave.peak" },
+      { token: unicode, offset: expect.any(Number), value: "Ünïcødé 𝄞" },
+      { token: lone, offset: expect.any(Number), value: "\ud800" },
+    ]);
+    expect(result.coverage).toEqual({ state: "complete", issues: [] });
+    const body = result.methods[0]?.body;
+    expect(body?.anchors.map(({ operand }) => operand)).toEqual([
+      unicode,
+      path,
+      lone,
+      path,
+    ]);
+    expect(body?.normalized_il_sha256).toBe(
+      inspect({ ilBody }).methods[0]?.body.normalized_il_sha256,
+    );
+  });
+
+  it("keeps the method and reports partial coverage when #US is absent", () => {
+    const result = inspect({ ilBody: ldstrBody(["0x70000001"]) });
+
+    expect(result.methods).toHaveLength(1);
+    expect(result.user_strings).toEqual([]);
+    expect(result.coverage).toEqual({
+      state: "partial",
+      issues: [
+        {
+          code: "missing-stream",
+          scope: "metadata.#US:0x70000001",
+          offset: null,
+          detail: "ldstr references #US, but the metadata has no #US stream",
+        },
+      ],
+    });
+  });
+
+  it("retains readable literals beside malformed #US items", () => {
+    const { heap, tokens } = fixtureUserStringHeap(["ok", "bad"]);
+    const [ok, bad] = tokens as [string, string];
+    // "bad" encodes 7 bytes; an even length cannot end in the flag byte.
+    const badOffset = Number.parseInt(bad.slice(4), 16);
+    heap.writeUInt8(6, badOffset);
+    const result = inspect({
+      ilBody: ldstrBody([ok, bad, "0x70ffffff"]),
+      userStringHeap: heap,
+    });
+
+    expect(result.user_strings).toEqual([
+      { token: ok, offset: expect.any(Number), value: "ok" },
+    ]);
+    expect(result.coverage.state).toBe("partial");
+    expect(
+      result.coverage.issues.map(({ code, scope }) => [code, scope]),
+    ).toEqual([
+      ["invalid-string", `metadata.#US:${bad}`],
+      ["invalid-heap-index", "metadata.#US:0x70ffffff"],
+    ]);
+  });
+
+  it("leaves user strings unexamined when CLI metadata is unavailable or predates them", () => {
+    const native = buildNativePeFixture();
+    expect(
+      inspectManagedMembersBytes(native, managedPeFixtureTarget(native))
+        .user_strings,
+    ).toBeNull();
+
+    const { user_strings: _omitted, ...legacy } = inspect({});
+    expect(managedMemberInspectionSchema.parse(legacy).user_strings).toBeNull();
   });
 });
 
@@ -885,7 +987,7 @@ describe("managed member type selection", () => {
     expect(result.field_accesses).toEqual(everything.field_accesses);
     expect(result.coverage).toEqual(everything.coverage);
     expect(result.limitations).toContain(
-      "Types, fields, methods, call edges, and field accesses cover only the selected declaring types; coverage describes that selection. Edge targets outside it keep their names but are not described.",
+      "Types, fields, methods, call edges, field accesses, and user strings cover only the selected declaring types; coverage describes that selection. Edge targets outside it keep their names but are not described.",
     );
   });
 

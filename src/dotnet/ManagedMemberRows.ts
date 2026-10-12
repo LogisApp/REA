@@ -16,6 +16,7 @@ import {
   type ManagedFieldAccess,
   type ManagedMemberRef,
   type ManagedMethod,
+  type ManagedUserString,
   type MemberRefCore,
   type MethodCore,
   type TypeRange,
@@ -27,6 +28,7 @@ import {
   metadataCodedTokenInvalidReason,
   readMetadataBlob,
   readMetadataString,
+  readMetadataUserString,
 } from "./ManagedMetadataHeaps.js";
 import { readManagedValue } from "./ManagedReaderFailure.js";
 import { methodBody } from "./ManagedMethodBodyReader.js";
@@ -315,6 +317,36 @@ export const parseMethods = ({
     }, issues);
   }
   return { methods, core, issues };
+};
+
+/** Decode each distinct #US literal an inspected method loads, in token order. */
+export const parseUserStrings = (
+  bytes: Buffer,
+  layout: ManagedMetadataLayout,
+  methods: readonly ManagedMethod[],
+): {
+  readonly userStrings: readonly ManagedUserString[];
+  readonly issues: readonly ManagedParseIssue[];
+} => {
+  const tokens = new Set<string>();
+  for (const method of methods)
+    for (const anchor of method.body.anchors)
+      if (anchor.operand_kind === "string" && anchor.operand !== null)
+        tokens.add(anchor.operand);
+  const userStrings: ManagedUserString[] = [];
+  const issues: ManagedParseIssue[] = [];
+  // Tokens are fixed-width lowercase hex, so string order is token order.
+  for (const token of [...tokens].sort())
+    readManagedValue(() => {
+      const { offset, value } = readMetadataUserString(bytes, layout, token);
+      userStrings.push(
+        admitManagedProjection(
+          { token, offset, value },
+          managedDecodeBudget(layout),
+        ),
+      );
+    }, issues);
+  return { userStrings, issues };
 };
 
 const targetKind = (token: string): ManagedCallEdge["target_kind"] =>
