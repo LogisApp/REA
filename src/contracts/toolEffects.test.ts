@@ -13,6 +13,8 @@ const EXECUTION_WORDING =
   /\b(?:run|runs|running|launch|launches|launching|execute|executes|executing|execution|start|starts|install|installs|uninstall|uninstalls)\b/iu;
 
 const EXECUTION_WORDING_EXCEPTIONS: Readonly<Record<string, string>> = {
+  inspect_with_objdump: "runs a caller-selected inspection tool, not target code",
+  start_gdb_session: "starts a debugger session; execution is attributed to gdb_console",
   inspect_native_load_image: "states that it does not execute the target",
   resolve_native_call_targets: "states that it does not execute code",
   inspect_pe_resources: "states that it does not execute the image",
@@ -114,6 +116,9 @@ describe("tool effects", () => {
       "capture_electron_scenario",
       "capture_native_ui_scenario",
       "capture_process_scenario",
+      "close_gdb_session",
+      "execute_rizin_command",
+      "gdb_console",
       "install_adb_package",
       "observe_native_calls",
       "push_adb_file",
@@ -149,6 +154,13 @@ describe("tool effects", () => {
         idempotentHint: true,
         openWorldHint: false,
       });
+  });
+
+  it("marks automatic GDB detach as destructive target execution", () => {
+    const effects = TOOL_EFFECTS["close_gdb_session"];
+    if (effects === undefined) throw new Error("close_gdb_session is unaudited");
+    expect(effects).toMatchObject({ mutatesTarget: true, executesForeignCode: true });
+    expect(annotationsFromEffects(effects).destructiveHint).toBe(true);
   });
 
   it("publishes the advertised annotations derived from canonical effects", () => {
