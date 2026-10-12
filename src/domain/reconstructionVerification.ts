@@ -138,21 +138,21 @@ const evaluateClaim = (
     return source;
   });
   validateSourceKinds(claim, sources);
-  const observed = observedStatus(claim, comparison);
+  const observed = selectObservation(claim, comparison);
   const limitations = authorityLimitations(claim, sources, sides);
   const relevantUnknowns = reconstructionClaimUnknowns(
     heads,
     comparison.evidence_id,
     allSourceIds,
   );
-  const status = classify(observed, limitations, relevantUnknowns);
+  const status = classify(observed.status, limitations, relevantUnknowns);
   const displayedUnknowns = relevantUnknowns;
   return reconstructionClaimResultSchema.parse({
     claim_id: claim.claim_id,
     kind: claim.kind,
     dimension: claim.dimension,
     status,
-    observed_status: observed,
+    observed_status: observed.status,
     comparison_evidence_id: comparison.evidence_id,
     left_evidence_ids: sides.left,
     right_evidence_ids: sides.right,
@@ -160,6 +160,7 @@ const evaluateClaim = (
     unknown_ids: displayedUnknowns.map(({ unknown_id: id }) => id),
     limitations: uniqueSorted([
       ...comparison.limitations,
+      ...observed.limitations,
       ...limitations,
       ...displayedUnknowns.map(
         ({ question }) => `Residual unknown: ${question}`,
@@ -215,21 +216,35 @@ const validateComparisonIdentity = (claim: Claim, evidence: Evidence): void => {
     throw new TypeError("Comparison Evidence identity or authority disagrees");
 };
 
-const observedStatus = (claim: Claim, evidence: Evidence): ObservedStatus => {
+const selectObservation = (
+  claim: Claim,
+  evidence: Evidence,
+): {
+  readonly status: ObservedStatus;
+  readonly limitations: readonly string[];
+} => {
   if (claim.kind === "behavioral") {
     const result = processCaptureComparisonSchema.parse(
       evidence.normalized_result,
     );
     validateProcessStatus(result);
-    return claim.dimension === "overall"
-      ? result.status
-      : result[claim.dimension];
+    return {
+      status:
+        claim.dimension === "overall" ? result.status : result[claim.dimension],
+      limitations: [],
+    };
   }
   if (claim.kind === "structural-function") {
     const result = functionComparisonResultSchema.parse(
       evidence.normalized_result,
     );
-    if (claim.dimension === "overall") return result.status;
+    if (claim.dimension === "overall")
+      return {
+        status: result.status,
+        limitations: result.dimensions.flatMap(
+          ({ limitations }) => limitations,
+        ),
+      };
     const dimension = result.dimensions.find(
       (item) => item.dimension === claim.dimension,
     );
@@ -243,7 +258,7 @@ const observedStatus = (claim: Claim, evidence: Evidence): ObservedStatus => {
       throw new TypeError(
         "Function dimension cites Evidence outside comparison closure",
       );
-    return dimension.status;
+    return { status: dimension.status, limitations: dimension.limitations };
   }
   const result = artifactComparisonResultSchema.parse(
     evidence.normalized_result,
@@ -256,7 +271,7 @@ const observedStatus = (claim: Claim, evidence: Evidence): ObservedStatus => {
     throw new TypeError(
       "Artifact change cites Evidence outside comparison closure",
     );
-  return result.status;
+  return { status: result.status, limitations: [] };
 };
 
 const validateProcessStatus = (

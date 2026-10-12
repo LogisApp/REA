@@ -236,7 +236,10 @@ const correlate = (
     mapping.runtime.comparison_evidence_id,
     "runtime comparison",
   );
-  const selectedStatic = selectStatic(staticEvidence, mapping.static.selector);
+  const { limitations: selectedLimitations, ...selectedStatic } = selectStatic(
+    staticEvidence,
+    mapping.static.selector,
+  );
   const process = processCaptureComparisonSchema.parse(
     runtimeEvidence.normalized_result,
   );
@@ -270,6 +273,7 @@ const correlate = (
     ]),
     limitations: uniqueSorted([
       ...staticEvidence.limitations,
+      ...selectedLimitations,
       ...runtimeEvidence.limitations,
       ...process.limitations,
       "This correlation tests an explicit hypothesis and does not establish causality.",
@@ -281,7 +285,9 @@ const correlate = (
 const selectStatic = (
   evidence: Evidence,
   selector: z.infer<typeof staticSelectorSchema>,
-): Pick<CorrelationItem["static"], "status" | "conclusion_kind"> => {
+): Pick<CorrelationItem["static"], "status" | "conclusion_kind"> & {
+  readonly limitations: readonly string[];
+} => {
   if (selector.kind === "function") {
     if (evidence.operation !== "compare_functions")
       throw new TypeError(
@@ -299,6 +305,7 @@ const selectStatic = (
     return {
       status: match.status,
       conclusion_kind: match.conclusion_kind,
+      limitations: match.limitations,
     };
   }
   if (evidence.operation !== "compare_artifacts")
@@ -319,6 +326,7 @@ const selectStatic = (
   const status = match.classification;
   return {
     status,
+    limitations: [],
     conclusion_kind:
       status === "contradiction"
         ? "contradiction"
