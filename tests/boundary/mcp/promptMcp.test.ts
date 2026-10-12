@@ -374,6 +374,12 @@ describe("guided prompt completion lifecycle", () => {
       arguments: { path: first },
     });
     expect(opened).not.toMatchObject({ isError: true });
+    // Completion never cold-starts the deep provider (#2076): it stays empty
+    // until a real tool call warms the provider.
+    expect(await complete(client, "document", "first")).toEqual([]);
+    expect(
+      await client.callTool({ name: "list_documents", arguments: {} }),
+    ).not.toMatchObject({ isError: true });
     expect(await complete(client, "document", "first")).toEqual([
       "first-document",
     ]);
@@ -396,6 +402,12 @@ describe("guided prompt completion lifecycle", () => {
       ).isError,
     ).not.toBe(true);
     expect(await complete(client, "document", "first")).toEqual([]);
+    // Switching targets retires the warmed client, so completion is cold
+    // again until a tool call warms the new target's provider.
+    expect(await complete(client, "document", "second")).toEqual([]);
+    expect(
+      await client.callTool({ name: "list_documents", arguments: {} }),
+    ).not.toMatchObject({ isError: true });
     expect(await complete(client, "document", "second")).toEqual([
       "second-document",
     ]);

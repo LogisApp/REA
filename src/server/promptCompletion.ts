@@ -5,6 +5,7 @@ import { uniqueSorted } from "../domain/canonicalOrdering.js";
 import type { AnalysisOperationPort } from "../application/AnalysisProvider.js";
 import type { BinarySessionPort } from "../application/binary/BinarySessionPort.js";
 import type { PromptCompletionKind } from "../contracts/promptContracts.js";
+import type { JsonValue } from "../domain/jsonValue.js";
 import { artifactInventoryResultSchema } from "../domain/artifactGraph.js";
 import { artifactInspectionResultSchema } from "../domain/artifactInspection.js";
 import { parseProcessCapture } from "../domain/process/processCaptureParsing.js";
@@ -72,10 +73,45 @@ const completionCandidates = async (
   }
 };
 
+/** Bound a warm completion call so it never waits behind a deep-provider queue.
+ * Cold sessions return `[]` before this is reached and never start a provider. */
+const COMPLETION_TIMEOUT_MS = 5_000;
+
+const isCompletionCold = (
+  analysis: AnalysisOperationPort,
+  operation: "list_documents" | "list_procedures",
+): boolean => {
+  const warmed = (
+    analysis as Partial<Pick<BinarySessionPort, "isOperationWarmed">>
+  ).isOperationWarmed;
+  // Ports without warmth reporting (plain operation ports, fixed-target
+  // analysis) keep their existing behavior; only BinarySession gates, and
+  // only for the provider serving the completed operation.
+  if (typeof warmed !== "function") return false;
+  try {
+    return warmed.call(analysis, operation) !== true;
+  } catch {
+    return true;
+  }
+};
+
+const executeCompletion = (
+  analysis: AnalysisOperationPort,
+  operation: "list_documents" | "list_procedures",
+  parameters: Readonly<Record<string, JsonValue>>,
+) => {
+  const signal = AbortSignal.timeout(COMPLETION_TIMEOUT_MS);
+  return analysis.execute(operation, parameters, { signal }).catch(() => ({
+    ok: false as const,
+    error: null as never,
+  }));
+};
+
 const documentCandidates = async (
   analysis: AnalysisOperationPort,
 ): Promise<readonly string[]> => {
-  const result = await analysis.execute("list_documents", {});
+  if (isCompletionCold(analysis, "list_documents")) return [];
+  const result = await executeCompletion(analysis, "list_documents", {});
   if (!result.ok) return [];
   const parsed = documentListSchema.safeParse(result.value.result);
   return parsed.success ? parsed.data : [];
@@ -85,10 +121,11 @@ const procedureCandidates = async (
   analysis: AnalysisOperationPort,
   document: string | undefined,
 ): Promise<readonly string[]> => {
+  if (isCompletionCold(analysis, "list_procedures")) return [];
   const byAddress = new Map<string, string>();
   const input =
     document === undefined || document.length === 0 ? {} : { document };
-  const result = await analysis.execute("list_procedures", input);
+  const result = await executeCompletion(analysis, "list_procedures", input);
   if (result.ok) {
     const parsed = z
       .array(z.object({ address: z.string(), value: z.string() }))

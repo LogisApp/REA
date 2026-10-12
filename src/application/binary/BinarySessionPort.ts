@@ -66,6 +66,10 @@ export interface BinarySessionPort
   ): Promise<Result<SavedAnalysisSnapshot, AnalysisError>>;
   status(): JsonValue;
   activeTarget(): BinaryTarget | undefined;
+  /** Side-effect-free readiness for prompt completion (issue #2076).
+   * Returns true once a non-health operation has been dispatched to the
+   * provider serving `operation`. Absent on ports that cannot report warmth. */
+  isOperationWarmed?(operation: AnalysisOperation): boolean;
   exportAnalysisSnapshot(): Result<AnalysisSnapshot, AnalysisError>;
   importAnalysisSnapshot(
     snapshot: AnalysisSnapshot,

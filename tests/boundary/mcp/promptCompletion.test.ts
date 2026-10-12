@@ -5,8 +5,16 @@ import { afterEach, describe, expect, it } from "vitest";
 
 import { createTestTempDirectory } from "../../fixtures/temporaryDirectory.js";
 
-import type { AnalysisClient } from "../../../src/application/AnalysisProvider.js";
+import type {
+  AnalysisClient,
+  AnalysisOperation,
+  AnalysisProvider,
+  CapabilityDescriptor,
+} from "../../../src/application/AnalysisProvider.js";
 import { createTestBinarySession } from "../../fixtures/binarySession.js";
+import { BinarySession } from "../../../src/application/binary/BinarySession.js";
+import { SessionProviderRouter } from "../../../src/application/binary/SessionProviderRouter.js";
+import { AnalysisProviderRegistry } from "../../../src/application/binary/AnalysisProviderRegistry.js";
 import { ARTIFACT_COMPARISON_EXAMPLE } from "../../../src/contracts/artifactComparisonExample.js";
 import { PROCESS_CAPTURE_REFERENCE } from "../../../src/contracts/investigationExamples.js";
 import { EMPTY_PROCESS_CAPTURE_EXAMPLE } from "../../../src/domain/process/processCaptureExample.js";
@@ -50,6 +58,16 @@ describe("guided prompt completion from live analysis", () => {
     expect((await session.open(target)).ok).toBe(true);
     const completion = createPromptCompletionSource(session, session);
 
+    // Completion never cold-starts a deep provider (#2076): a fresh open only
+    // runs `health`, so document/procedure completion stays empty with no
+    // provider call until a real tool call warms the provider.
+    expect(session.isOperationWarmed("list_documents")).toBe(false);
+    expect(await completion.complete("document", "app")).toEqual([]);
+    expect(await completion.complete("procedure", "")).toEqual([]);
+    expect(requests).toEqual([]);
+
+    expect((await session.execute("list_documents", {})).ok).toBe(true);
+    expect(session.isOperationWarmed("list_documents")).toBe(true);
     expect(await completion.complete("document", "app")).toEqual([
       "App",
       "AppTests",
@@ -68,6 +86,108 @@ describe("guided prompt completion from live analysis", () => {
     await session.close();
     expect(await completion.complete("document", "")).toEqual([]);
     expect(await completion.complete("procedure", "")).toEqual([]);
+  });
+});
+
+describe("guided prompt completion without provider work", () => {
+  it("never dispatches a provider operation for cold completion", async () => {
+    const operations: string[] = [];
+    const session = createTestBinarySession(
+      () => ({
+        execute(operation, parameters) {
+          operations.push(operation);
+          return client([]).execute(operation, parameters);
+        },
+        close: () => Promise.resolve(resultOk(null)),
+      }),
+      {
+        resolveAnalysisProfile: () =>
+          Promise.resolve(
+            resultOk({
+              profile: createAnalysisProfile(
+                {
+                  id: "fixture",
+                  name: "Fixture analysis provider",
+                  version: "1",
+                },
+                { fixture: true },
+              ),
+            }),
+          ),
+      },
+    );
+    directory = await createTestTempDirectory("rea-prompt-completion-");
+    const target = join(directory, "fixture.hop");
+    await writeFile(target, "fixture");
+    expect((await session.open(target)).ok).toBe(true);
+    // Open only runs the composite `health` probe, which answers without
+    // creating a child: not even `health` reaches the deep provider.
+    expect(operations).toEqual([]);
+
+    const completion = createPromptCompletionSource(session, session);
+    expect(await completion.complete("document", "")).toEqual([]);
+    expect(await completion.complete("procedure", "")).toEqual([]);
+    // No `list_documents`/`list_procedures` dispatch: the deep provider is
+    // never started as a completion side effect.
+    expect(operations).toEqual([]);
+
+    await session.close();
+  });
+});
+
+describe("guided prompt completion across providers", () => {
+  it("keeps inventory completion cold after an auxiliary-provider call", async () => {
+    const deepOperations: string[] = [];
+    const auxiliaryOperations: string[] = [];
+    const session = new BinarySession(
+      SessionProviderRouter.selectable(new AnalysisProviderRegistry([]), [
+        recordingProvider(
+          { id: "deep", name: "Deep analysis provider", version: "1" },
+          ["list_documents", "list_procedures"],
+          deepOperations,
+          (operation) =>
+            Promise.resolve(
+              observed(
+                operation === "list_documents"
+                  ? ["DeepDoc"]
+                  : [{ address: "0x1", value: "deep-procedure" }],
+              ),
+            ),
+        ),
+        recordingProvider(
+          {
+            id: "auxiliary",
+            name: "Auxiliary analysis provider",
+            version: "1",
+          },
+          ["inspect_artifact"],
+          auxiliaryOperations,
+          () => Promise.resolve(observed(null)),
+        ),
+      ]),
+    );
+    directory = await createTestTempDirectory("rea-prompt-completion-");
+    const target = join(directory, "fixture.hop");
+    await writeFile(target, "fixture");
+    expect((await session.open(target)).ok).toBe(true);
+    const completion = createPromptCompletionSource(session, session);
+
+    // An auxiliary call warms only its own provider: inventory completion
+    // must stay cold and dispatch nothing to the deep provider.
+    expect((await session.execute("inspect_artifact", {})).ok).toBe(true);
+    expect(auxiliaryOperations).toEqual(["inspect_artifact"]);
+    expect(session.isOperationWarmed("inspect_artifact")).toBe(true);
+    expect(session.isOperationWarmed("list_documents")).toBe(false);
+    expect(session.isOperationWarmed("list_procedures")).toBe(false);
+    expect(await completion.complete("document", "")).toEqual([]);
+    expect(await completion.complete("procedure", "")).toEqual([]);
+    expect(deepOperations).toEqual([]);
+
+    expect((await session.execute("list_documents", {})).ok).toBe(true);
+    expect(session.isOperationWarmed("list_documents")).toBe(true);
+    expect(await completion.complete("document", "deep")).toEqual(["DeepDoc"]);
+
+    await session.close();
   });
 });
 
@@ -260,6 +380,51 @@ describe("guided prompt completion from complete inventories", () => {
 });
 
 const fixtureProvider = { id: "fixture", name: "Fixture", version: "1" };
+
+interface SplitProviderIdentity {
+  readonly id: string;
+  readonly name: string;
+  readonly version: string;
+}
+
+const splitProviderCapabilities = (
+  provider: SplitProviderIdentity,
+  operations: readonly Exclude<AnalysisOperation, "health">[],
+): readonly CapabilityDescriptor[] =>
+  operations.map((operation) => ({
+    provider,
+    operation,
+    available: true,
+    reason: null,
+    cachePolicy: "live",
+    effects: {
+      mutatesArtifact: false,
+      launchesProcess: false,
+      mayShowUi: false,
+      mayAccessNetwork: false,
+      mayWriteFilesystem: false,
+      changesPermissions: false,
+      requiresRoot: false,
+    },
+    limitations: [],
+  }));
+
+const recordingProvider = (
+  identity: SplitProviderIdentity,
+  operations: readonly Exclude<AnalysisOperation, "health">[],
+  executed: string[],
+  respond: (operation: string) => ReturnType<AnalysisClient["execute"]>,
+): AnalysisProvider => ({
+  identity: () => identity,
+  capabilities: () => splitProviderCapabilities(identity, operations),
+  createClient: () => ({
+    execute: (operation, parameters) => {
+      executed.push(operation);
+      return respond(operation);
+    },
+    close: () => Promise.resolve(resultOk(null)),
+  }),
+});
 const fixtureEnvironment = {
   id: "fixture-linux",
   platform: "linux",

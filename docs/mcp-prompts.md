@@ -91,16 +91,16 @@ identifiers only; they do not retrieve or replace the inline Evidence result.
 
 Completion sources are live projections of the current session:
 
-| Argument family     | Source and filtering                                                                                                                                 |
-| ------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Document            | Current provider `list_documents` result.                                                                                                            |
-| Procedure           | The complete `list_procedures` inventory; all procedure addresses and uniquely named procedures are offered. Optional document context is forwarded. |
-| Provider            | `auto` plus sorted deep candidates from the current binary session; target-free completion does not start them.                                      |
-| Evidence            | Evidence IDs retained in the current session ledger, offered only for prompt arguments that accept Evidence references.                              |
-| Process capture     | IDs for retained Evidence whose operation and validated result identify process capture.                                                             |
-| Artifact manifest   | Manifest IDs from schema-valid retained artifact inventories.                                                                                        |
-| Artifact occurrence | Occurrence IDs present in schema-valid retained artifact inventory pages.                                                                            |
-| Residual unknown    | Current non-resolved unknown heads only.                                                                                                             |
+| Argument family     | Source and filtering                                                                                                                                                                         |
+| ------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Document            | Current provider `list_documents` result. Returns `[]` until a tool call has warmed the provider; completion never cold-starts Ghidra/Hopper and waits at most 5 s on a warm provider.       |
+| Procedure           | The complete `list_procedures` inventory; all procedure addresses and uniquely named procedures are offered. Optional document context is forwarded. Same warm-only, 5 s bound as documents. |
+| Provider            | `auto` plus sorted deep candidates from the current binary session; target-free completion does not start them.                                                                              |
+| Evidence            | Evidence IDs retained in the current session ledger, offered only for prompt arguments that accept Evidence references.                                                                      |
+| Process capture     | IDs for retained Evidence whose operation and validated result identify process capture.                                                                                                     |
+| Artifact manifest   | Manifest IDs from schema-valid retained artifact inventories.                                                                                                                                |
+| Artifact occurrence | Occurrence IDs present in schema-valid retained artifact inventory pages.                                                                                                                    |
+| Residual unknown    | Current non-resolved unknown heads only.                                                                                                                                                     |
 
 Suggestions are Unicode-normalized, case-insensitive prefix matches. The server
 deduplicates them and sorts by code point for deterministic results. Procedure
