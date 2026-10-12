@@ -6,12 +6,14 @@ import {
   AnalysisAccessDeniedError,
   AnalysisInputError,
   AnalysisOutputError,
+  AnalysisResourceConstraintError,
   AnalysisTimeoutError,
   AnalysisCapabilityUnavailableError,
 } from "../domain/analysisErrorCore.js";
 import { ProviderCleanupError } from "../domain/providerCleanupError.js";
 import { OwnedCommandFailure } from "../process/OwnedCommand.js";
 import { WABT_LIMITS, WABT_PROVIDER_IDENTITY } from "./WabtRelease.js";
+const OUTPUT_LIMIT_EXCERPT_CHARACTERS = 4096;
 /** Preserve lifecycle failures and diagnostic bytes instead of returning partial success. */
 export const wabtFailure = (
   cause: unknown,
@@ -26,12 +28,18 @@ export const wabtFailure = (
   )
     return new AnalysisCancelledError("inspect_wasm_artifact", { cause });
   if (cause instanceof OwnedCommandFailure) {
+    // Past the output budget the retained text is a prefix of the oversized
+    // stream, so only a bounded excerpt of each stream is kept.
+    const retained = (text: string) =>
+      cause.reason === "output-limit"
+        ? text.slice(0, OUTPUT_LIMIT_EXCERPT_CHARACTERS)
+        : text;
     const capturedOutput =
       cause.snapshot === null
         ? undefined
         : {
-            stdout: cause.snapshot.stdout.text,
-            stderr: cause.snapshot.stderr.text,
+            stdout: retained(cause.snapshot.stdout.text),
+            stderr: retained(cause.snapshot.stderr.text),
             truncated: cause.snapshot.diagnosticTruncated ?? false,
           };
     const options =
@@ -56,6 +64,18 @@ export const wabtFailure = (
         "inspect_wasm_artifact",
         WABT_LIMITS.timeoutMs,
         options,
+      );
+    if (phase !== "configuration" && cause.reason === "output-limit")
+      return new AnalysisResourceConstraintError(
+        "inspect_wasm_artifact",
+        "memory",
+        `WABT output exceeded the ${String(WABT_LIMITS.outputBytes)}-byte output budget`,
+        { max_output_bytes: WABT_LIMITS.outputBytes },
+        {
+          ...options,
+          remediationAction:
+            "The WABT output budget is fixed, so retrying this module will fail the same way. It is too large for inspect_wasm_artifact.",
+        },
       );
     if (phase === "configuration" && cause.reason === "process")
       return new AnalysisCapabilityUnavailableError(
