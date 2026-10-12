@@ -4,6 +4,7 @@ import {
   describeClientRegistrationRetention,
   type ClientRegistrationDialect,
 } from "./ClientConfigurationDocument.js";
+import { describeDshRegistrationRetention } from "./DshCordisPatch.js";
 import { isOwnedClientRegistrationCommand } from "./ClientRegistrationIdentity.js";
 import {
   linuxHopperInstallDisclosure,
@@ -334,10 +335,10 @@ const clientConfigurationDetail = (
     (client.format === undefined || client.format === "unsupported"
       ? "json"
       : client.format);
-  const retainedFields = describeClientRegistrationRetention(
-    client.name,
-    dialect,
-  );
+  const retainedFields =
+    dialect === "dsh"
+      ? describeDshRegistrationRetention(command)
+      : describeClientRegistrationRetention(client.name, dialect);
   const environmentDetail =
     entries.length === 0
       ? ` No additional provider environment variables. Existing server environment overrides are retained. ${retainedFields}`
