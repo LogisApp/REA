@@ -145,6 +145,7 @@ REA には Node.js 22.x（>=22.19）、24.x（>=24.11）、または 26+ と npm
 | JEBプロジェクト                  | エンジンによるプロジェクトユニット、アーティファクトのダイジェスト、型/メソッドの擬似コード | 呼び出し側が起動し MCP を提供する JEB クライアント（REA_JEB_MCP_URL で選択）；[JEB ガイド](docs/jeb-analysis.md)                                   |
 | Android リソース                 | デコードされたマニフェスト、文字列テーブル、ロケール、バージョン情報                        | 呼び出し側が用意した Apktool ランチャー；[リソースガイド](docs/apktool-resource-analysis.md)                                                       |
 | ファームウェア                   | 領域、抽出結果、ネイティブ分析への引き継ぎ                                                  | Linux 上の Binwalk / Unblob；[ファームウェアガイド](docs/firmware-analysis.md)                                                                     |
+| 記録済みロジック信号             | デコーダ注釈、サンプル範囲、診断情報                                                        | Linux: sigrok-cli 0.7.2 + prlimit; [信号記録ガイド](docs/signal-recordings.md)                                                                     |
 | パッケージとリソース             | ファイル一覧、ダイジェスト、plist、Apple バンドルの構造、抽出されたリソース                 | [アーティファクトと JavaScript のガイド](docs/javascript-artifact-reconstruction.md)、[Apple アプリケーション](docs/apple-application-analysis.md) |
 | プロセスの動作                   | ターミナル出力、対話、終了とファイルシステムの観測結果、実行の比較                          | ネイティブ PTY を備えた Linux/macOS；[プロセスキャプチャ](docs/process-capture.md)                                                                 |
 
