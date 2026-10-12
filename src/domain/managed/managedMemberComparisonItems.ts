@@ -5,6 +5,7 @@ import type { ManagedMemberComparisonResult } from "./managedMemberComparison.js
 import {
   type ManagedFieldMatches,
   type ManagedMethodMatches,
+  identityOf,
   sha256,
 } from "./managedMemberComparisonMatch.js";
 
@@ -207,15 +208,12 @@ const absenceLimitations = (
         `signature-not-decoded: The member's ${member.signature.parse_status} signature was compared only by exact declared type, name, and raw bytes, so a changed or renamed counterpart could not be sought.`,
       ]),
   ...(member.signature.parse_status === "decoded" &&
-  opposite.oppositeUndecodedNames.has(declaredName(member))
+  opposite.oppositeUndecodedNames.has(identityOf(member))
     ? [
         `counterpart-signature-not-decoded: The ${opposite.opposite} ${opposite.inventory} inventory has an unpaired member with the same declared type and name whose signature was not decoded, so it may be this member with a changed signature.`,
       ]
     : []),
 ];
-
-const declaredName = (member: Method | Field): string =>
-  JSON.stringify([member.declaring_type, member.name]);
 
 /**
  * Declared names of unpaired members whose signature was not decoded: one-sided
@@ -233,7 +231,7 @@ const undecodedOneSidedNames = (members: {
     new Set(
       side
         .filter(({ item }) => item.signature.parse_status !== "decoded")
-        .map(({ item }) => declaredName(item)),
+        .map(({ item }) => identityOf(item)),
     );
   return {
     left: names([

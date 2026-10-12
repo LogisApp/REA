@@ -761,6 +761,97 @@ describe("managed member comparison remaps around kept identities", () => {
       }),
     ]);
   });
+});
+
+describe("managed member comparison of unresolved and held identities", () => {
+  it("does not pair members of unresolved types under different names", () => {
+    const base = inspect(buildManagedPeFixture(), "/tmp/orphan-names.dll");
+    const [method] = base.result.methods;
+    if (method === undefined) throw new Error("Expected a fixture method");
+    const orphan = { declaring_type: null, declaring_type_token: null };
+    const side = (name: string) => ({
+      ...base,
+      result: {
+        ...base.result,
+        methods: [{ ...method, ...orphan, name }],
+        fields: [],
+      },
+    });
+    const result = compareManagedMembers(side("Main"), side("Renamed"));
+
+    for (const item of result.methods)
+      expect(item.match.status).not.toBe("matched");
+  });
+
+  it("pairs a file with itself when members of an unresolved type share a body", () => {
+    const base = inspect(buildManagedPeFixture(), "/tmp/orphan-self.dll");
+    const [method] = base.result.methods;
+    const [field] = base.result.fields;
+    if (method === undefined || field === undefined)
+      throw new Error("Expected a fixture method and field");
+    const orphan = { declaring_type: null, declaring_type_token: null };
+    const inspected = {
+      ...base,
+      result: {
+        ...base.result,
+        methods: [
+          { ...method, ...orphan, name: "p" },
+          { ...method, ...orphan, name: "q", token: "0x06000002" },
+        ],
+        fields: [
+          { ...field, ...orphan, name: "a" },
+          { ...field, ...orphan, name: "b", token: "0x04000002" },
+        ],
+      },
+    };
+    const result = compareManagedMembers(inspected, inspected);
+
+    expect(result.matching.ambiguous).toBe(0);
+    expect(result.summary).toMatchObject({ unchanged: 4, unknown: 0 });
+  });
+
+  it("does not remap a member whose own identity is in an ambiguous group", () => {
+    const undecoded = { methodSignature: Buffer.from([0x00, 0x00, 0x7f]) };
+    const decoded = inspect(buildManagedPeFixture(), "/tmp/held-decoded.dll");
+    const held = inspect(buildManagedPeFixture(undecoded), "/tmp/held.dll");
+    const [undecodedMethod] = held.result.methods;
+    const [decodedMethod] = decoded.result.methods;
+    if (undecodedMethod === undefined || decodedMethod === undefined)
+      throw new Error("Expected fixture methods");
+    // The right keeps two identical undecoded Fixture.Program.Main, which
+    // stay ambiguous, and a copy of the decoded Main in another type.
+    const left = {
+      ...held,
+      result: {
+        ...held.result,
+        methods: [{ ...undecodedMethod, token: "0x06000002" }, decodedMethod],
+      },
+    };
+    const right = {
+      ...held,
+      result: {
+        ...held.result,
+        methods: [
+          undecodedMethod,
+          { ...undecodedMethod, token: "0x06000002" },
+          {
+            ...decodedMethod,
+            declaring_type: "Other.Twin",
+            declaring_type_token: "0x02000003",
+            token: "0x06000003",
+          },
+        ],
+      },
+    };
+
+    for (const result of [
+      compareManagedMembers(left, right),
+      compareManagedMembers(right, left),
+    ])
+      expect(
+        result.methods.filter(({ match }) => match.status === "matched"),
+      ).toEqual([]);
+  });
 
   it("does not remap a member whose declaring type is unresolved", () => {
     const base = inspect(buildManagedPeFixture(), "/tmp/orphan.dll");
