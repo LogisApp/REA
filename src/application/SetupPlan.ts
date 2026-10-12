@@ -1,5 +1,6 @@
 import { join } from "node:path";
 
+import { MCP_STARTUP_POLICY } from "../mcpStartupPolicy.js";
 import { isOwnedClientRegistrationCommand } from "./ClientRegistrationIdentity.js";
 import {
   linuxHopperInstallDisclosure,
@@ -258,8 +259,10 @@ const setupPlan = (input: {
       label: client.displayName ?? client.name,
       target: client.configPath,
       detail: clientConfigurationDetail(
-        client.name,
-        client.displayName ?? client.name,
+        {
+          name: client.name,
+          label: client.displayName ?? client.name,
+        },
         input.command,
         input.providerEnvironment,
         input.installHopper,
@@ -303,8 +306,7 @@ const majorVersion = (version: string): number =>
   Number.parseInt(version.split(".")[0] ?? "0", 10);
 
 const clientConfigurationDetail = (
-  clientName: string,
-  client: string,
+  client: { readonly name: string; readonly label: string },
   command: readonly string[],
   environment: SetupProviderEnvironment,
   installHopper: boolean,
@@ -312,10 +314,7 @@ const clientConfigurationDetail = (
   const entries = Object.entries(environment)
     .sort(([left], [right]) => left.localeCompare(right))
     .map(([name, value]) => `${name}=${value}`);
-  const retainedFields =
-    clientName === "grok_build"
-      ? "On an existing local command entry, other fields are retained. Remote-server keys and an enabled: false switch are removed; the entry disabled flag is kept. When that entry is remote, its other fields are replaced."
-      : "On an existing local command entry, other fields are retained. Remote-server keys and switches that turn the server off are removed. When that entry is remote, its other fields are replaced.";
+  const retainedFields = localEntryDisclosure(client.name);
   const environmentDetail =
     entries.length === 0
       ? ` No additional provider environment variables. Existing server environment overrides are retained. ${retainedFields}`
@@ -325,5 +324,21 @@ const clientConfigurationDetail = (
       ? " If this plan installs Hopper, REA will add HOPPER_LAUNCHER_PATH using the launcher path reported by that installation."
       : " The HOPPER_LAUNCHER_PATH value shown above is the current fallback; if this plan installs Hopper, REA will replace it with the launcher path reported by that installation."
     : "";
-  return `Add the REA MCP registration for ${client}; preserve unrelated configuration. Command: ${command.map((part) => JSON.stringify(part)).join(" ")}.${environmentDetail}${hopperDetail}`;
+  return `Add the REA MCP registration for ${client.label}; preserve unrelated configuration. Command: ${command.map((part) => JSON.stringify(part)).join(" ")}.${environmentDetail}${hopperDetail}`;
+};
+
+/** Say which entry fields setup rewrites, removes, or keeps before approval. */
+const localEntryDisclosure = (clientName: string): string => {
+  const rewritten =
+    clientName === "codex" || clientName === "grok_build"
+      ? `startup_timeout_sec, which setup sets to ${String(MCP_STARTUP_POLICY.codexStartupTimeoutSeconds)}, `
+      : clientName === "copilot_cli"
+        ? "tools, which setup sets to every tool, "
+        : "";
+  const removed =
+    clientName === "grok_build"
+      ? "remote-server keys and an enabled: false switch, which are removed. The entry disabled flag is kept."
+      : "remote-server keys and switches that turn the server off, which are removed.";
+  const exceptions = rewritten === "" ? removed : `${rewritten}and ${removed}`;
+  return `On an existing local command entry, user fields are kept except ${exceptions} When that entry is remote, its other fields are replaced.`;
 };
