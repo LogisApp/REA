@@ -138,7 +138,10 @@ const matchMethods = (
       },
       {
         basis: "structural-method-shape",
-        key: declaredAs(({ structuralKey }) => structuralKey),
+        // An unresolved owner has no declared shape match to prove.
+        key: declaredAs((keyed) =>
+          keyed.item.declaring_type === null ? null : keyed.structuralKey,
+        ),
       },
       {
         basis: "exact-il-signature",
@@ -230,19 +233,20 @@ const matchByKeys = <Item extends Declared>({
   const pairedRight = new Set<Keyed<Item>>();
   const pairs: MatchedPair<Item>[] = [];
   const ambiguous: Ambiguous<Item>[] = [];
+  const declarable = ownerlessDeclarable(left, right);
   for (const round of rounds) {
     const openLeft = left.filter((item) => !usedLeft.has(item));
     const openRight = right.filter((item) => !usedRight.has(item));
     const leftGroups = groupBy(
       round.remap === true
         ? remappable(openLeft, unpairedOf(right, pairedRight))
-        : openLeft,
+        : openLeft.filter(declarable),
       round.key,
     );
     const rightGroups = groupBy(
       round.remap === true
         ? remappable(openRight, unpairedOf(left, pairedLeft))
-        : openRight,
+        : openRight.filter(declarable),
       round.key,
     );
     for (const [key, leftItems] of leftGroups) {
@@ -303,16 +307,43 @@ const unpairedOf = <Item>(
 ): Keyed<Item>[] => items.filter((item) => !paired.has(item));
 
 /**
- * Members a remap round may group: no member of the same declared identity
- * left unpaired on the other side, whether one-sided or in an ambiguous group.
- * The sets are taken before grouping, so no group order decides a remap.
+ * Members a remap round may group: an unresolved owner, which keeps its group
+ * ambiguous, or no member of the same declared identity left unpaired on the
+ * other side, whether one-sided or in an ambiguous group. The sets are taken
+ * before grouping, so no group order decides a remap.
  */
-const remappable = <Item>(
+const remappable = <Item extends Declared>(
   items: readonly Keyed<Item>[],
   others: readonly Keyed<Item>[],
 ): Keyed<Item>[] => {
   const kept = new Set(others.map(({ identity }) => identity));
-  return items.filter(({ identity }) => !kept.has(identity));
+  return items.filter(
+    ({ item, identity }) => item.declaring_type === null || !kept.has(identity),
+  );
+};
+
+/**
+ * Whether a member may pair in a declared-identity round. A member with an
+ * unresolved owner may, only when no other member on either side shares its
+ * exact CIL/signature key: its owner might be any of them, so a shared key
+ * leaves it to the remap rounds, which keep such a group ambiguous.
+ */
+const ownerlessDeclarable = <Item extends Declared>(
+  left: readonly Keyed<Item>[],
+  right: readonly Keyed<Item>[],
+): ((member: Keyed<Item>) => boolean) => {
+  const count = (side: readonly Keyed<Item>[]) => {
+    const seen = new Map<string, number>();
+    for (const { exactKey } of side)
+      if (exactKey !== null) seen.set(exactKey, (seen.get(exactKey) ?? 0) + 1);
+    return seen;
+  };
+  const leftSeen = count(left);
+  const rightSeen = count(right);
+  return ({ item, exactKey }) =>
+    item.declaring_type !== null ||
+    exactKey === null ||
+    ((leftSeen.get(exactKey) ?? 0) <= 1 && (rightSeen.get(exactKey) ?? 0) <= 1);
 };
 
 const groupBy = <Item>(

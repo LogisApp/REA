@@ -799,7 +799,84 @@ describe("managed member comparison of unresolved and held identities", () => {
       expect(result.summary).toMatchObject({ added: 0, removed: 0 });
     }
   });
+});
 
+describe("managed member comparison of ownerless members", () => {
+  it("keeps an ownerless member ambiguous beside a resolved copy, as main does", () => {
+    const base = inspect(buildManagedPeFixture(), "/tmp/ownerless-copy.dll");
+    const [method] = base.result.methods;
+    if (method === undefined) throw new Error("Expected a fixture method");
+    const ownerless = {
+      ...method,
+      declaring_type: null,
+      declaring_type_token: null,
+    };
+    const left = {
+      ...base,
+      result: { ...base.result, methods: [ownerless], fields: [] },
+    };
+    // The right keeps the ownerless Foo and a resolved copy with the same
+    // CIL and signature; the left Foo's owner may be either one.
+    const right = {
+      ...base,
+      result: {
+        ...base.result,
+        methods: [ownerless, { ...method, token: "0x06000002" }],
+        fields: [],
+      },
+    };
+
+    for (const result of [
+      compareManagedMembers(left, right),
+      compareManagedMembers(right, left),
+    ]) {
+      expect(result.matching.ambiguous).toBe(1);
+      expect(
+        result.methods.filter(({ match }) => match.status === "matched"),
+      ).toEqual([]);
+      expect(result.summary).toMatchObject({ added: 0, removed: 0 });
+    }
+  });
+
+  it("keeps an ownerless method ambiguous beside a resolved method of the same shape", () => {
+    const base = inspect(buildManagedPeFixture(), "/tmp/ownerless-shape.dll");
+    const [method] = base.result.methods;
+    if (method === undefined) throw new Error("Expected a fixture method");
+    const ownerless = {
+      ...method,
+      declaring_type: null,
+      declaring_type_token: null,
+    };
+    // Raw signature digests differ, so only the decoded shape links them.
+    const reshaped = (raw: string, token: string) => ({
+      signature: { ...method.signature, raw_sha256: raw.repeat(64) },
+      token,
+    });
+    const left = {
+      ...base,
+      result: { ...base.result, methods: [ownerless], fields: [] },
+    };
+    const right = {
+      ...base,
+      result: {
+        ...base.result,
+        methods: [
+          { ...ownerless, ...reshaped("e", "0x06000001") },
+          { ...method, name: "Bar", ...reshaped("d", "0x06000002") },
+        ],
+        fields: [],
+      },
+    };
+    const result = compareManagedMembers(left, right);
+
+    expect(result.matching.ambiguous).toBe(1);
+    expect(
+      result.methods.filter(({ match }) => match.status === "matched"),
+    ).toEqual([]);
+  });
+});
+
+describe("managed member comparison of unresolved owners", () => {
   it("does not pair members of unresolved types under different names", () => {
     const base = inspect(buildManagedPeFixture(), "/tmp/orphan-names.dll");
     const [method] = base.result.methods;
@@ -819,7 +896,7 @@ describe("managed member comparison of unresolved and held identities", () => {
       expect(item.match.status).not.toBe("matched");
   });
 
-  it("pairs a file with itself when members of an unresolved type share a body", () => {
+  it("keeps ownerless members that share a body ambiguous, as main does", () => {
     const base = inspect(buildManagedPeFixture(), "/tmp/orphan-self.dll");
     const [method] = base.result.methods;
     const [field] = base.result.fields;
@@ -842,8 +919,13 @@ describe("managed member comparison of unresolved and held identities", () => {
     };
     const result = compareManagedMembers(inspected, inspected);
 
-    expect(result.matching.ambiguous).toBe(0);
-    expect(result.summary).toMatchObject({ unchanged: 4, unknown: 0 });
+    // Their owners are unknown, so `p` may be `q`; names alone cannot tell.
+    expect(result.matching.ambiguous).toBe(2);
+    expect(
+      [...result.methods, ...result.fields].filter(
+        ({ match }) => match.status === "matched",
+      ),
+    ).toEqual([]);
   });
 
   it("does not remap a member whose own identity is in an ambiguous group", () => {

@@ -240,16 +240,18 @@ structural body shape; fields by raw signature. Only then may a remap pair a
 renamed or moved member across declared types or names: a method by exact
 CIL/signature identity or structural body shape, a field by exact decoded
 signature. A remap never takes a member whose own declared type and name remain
-unpaired on the other side, or a member whose declaring type is unresolved, so
-a member is never taken from its own changed counterpart. The exact-signature
-key uses names only as part of that full tuple; names alone never select a
-pair. Duplicate tuples remain ambiguous rather than being paired by token
-order. The raw signature is exact whether or not REA decoded it, so undecoded
-signatures pair by that tuple too, but they never enter structural rounds. An
-unmatched member is therefore reported as `unknown`, not added or removed, when
-its own signature was not decoded or when the other side has an unpaired
-member, one-sided or ambiguous, with the same declared type and name whose
-signature was not decoded.
+unpaired on the other side, so a member is never taken from its own changed
+counterpart. A member whose declaring type is unresolved could belong to any
+type, so it pairs by name only when no other member shares its exact
+CIL/signature key, never by structural shape alone, and any remap group it
+joins stays ambiguous. The exact-signature key uses names only as part of that
+full tuple; names alone never select a pair. Duplicate tuples remain ambiguous
+rather than being paired by token order. The raw signature is exact whether or
+not REA decoded it, so undecoded signatures pair by that tuple too, but they
+never enter structural rounds. An unmatched member is therefore reported as
+`unknown`, not added or removed, when its own signature was not decoded or when
+the other side has an unpaired member, one-sided or ambiguous, with the same
+declared type and name whose signature was not decoded.
 
 For a matched method, an unavailable or partial body makes body-shape facets
 unknown while preserving observed signature differences. Structural identity
