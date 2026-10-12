@@ -94,13 +94,12 @@ export const preflightPropertyListDecode = (
   maxBytes: number,
   xmlText?: string,
 ): PlistDecodePreflight => {
-  const expansion =
-    bytes.subarray(0, 8).toString("ascii") === "bplist00"
-      ? estimateBinaryPlistExpansion(bytes, maxBytes)
-      : {
-          estimatedBytes: estimateXmlPlistExpansion(bytes, maxBytes, xmlText),
-          binaryPrototypeKeyObserved: false,
-        };
+  const expansion = bytes.subarray(0, 8).equals(Buffer.from("bplist00"))
+    ? estimateBinaryPlistExpansion(bytes, maxBytes)
+    : {
+        estimatedBytes: estimateXmlPlistExpansion(bytes, maxBytes, xmlText),
+        binaryPrototypeKeyObserved: false,
+      };
   if (expansion.estimatedBytes > maxBytes)
     throw new InterfaceBuilderDecodeBudgetExceeded(
       "aggregate_decode_budget_exhausted",

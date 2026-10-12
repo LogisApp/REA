@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { build, buildBinary } from "plist";
+import { KeyedArchiveKindError } from "../../domain/apple/keyedArchive.js";
 import { decodeKeyedArchiveBytes } from "./KeyedArchiveReader.js";
 
 const archive = {
@@ -98,6 +99,29 @@ describe("inert keyed archive decoding", () => {
     expect(graph.limitations).not.toContain(
       "Dictionary entries keyed __proto__ were omitted because REA results cannot represent that key.",
     );
+  });
+  it("does not treat a high-bit fold as NIBArchive or bplist00 magic", () => {
+    const nib = Buffer.from("NIBArchive");
+    nib[0] = (nib[0] ?? 0) | 0x80;
+    let nibCause: unknown;
+    try {
+      decodeKeyedArchiveBytes(nib, { offset: 0, limit: 1 });
+    } catch (cause: unknown) {
+      nibCause = cause;
+    }
+    expect(nibCause).toBeInstanceOf(Error);
+    expect(nibCause).not.toBeInstanceOf(KeyedArchiveKindError);
+
+    const plist = Buffer.from("bplist00");
+    plist[0] = (plist[0] ?? 0) | 0x80;
+    let plistCause: unknown;
+    try {
+      decodeKeyedArchiveBytes(plist, { offset: 0, limit: 1 });
+    } catch (cause: unknown) {
+      plistCause = cause;
+    }
+    expect(plistCause).toBeInstanceOf(Error);
+    expect((plistCause as Error).message).not.toContain("binary plist");
   });
   it("rejects missing roots, malformed plist, and non-keyed archives", () => {
     expect(() =>
