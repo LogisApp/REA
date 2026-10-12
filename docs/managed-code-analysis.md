@@ -234,12 +234,15 @@ UTF-8 encoding, and lowercase hexadecimal output.
 Names and semantic labels do not establish durable member identity. Comparison
 preserves observed differences, structural inferences, and unknowns separately.
 
-Cross-version matching first prefers exact CIL/signature identity. When that
-does not match, it pairs an exact declared type, method name, and raw signature
-before trying structural body shape. The exact-signature key uses names only
-as part of that full tuple; names alone never select a pair. Duplicate tuples
-remain ambiguous rather than being paired by token order. Fields follow the
-same exact tiers. The raw signature is exact whether or not REA decoded it, so
+Cross-version matching first pairs members of the same declared type and name
+with exact CIL/signature identity, then with the same raw signature. Only then
+may exact CIL/signature identity or structural body shape pair members across
+declared types or names, as a remap of a renamed or moved member. Such a remap
+is not made while either member's own declared type and name remain unpaired
+on the other side, so a member is never taken from its own changed
+counterpart. The exact-signature key uses names only as part of that full
+tuple; names alone never select a pair. Duplicate tuples remain ambiguous
+rather than being paired by token order. Fields follow the same exact tiers. The raw signature is exact whether or not REA decoded it, so
 undecoded signatures pair by that tuple too, but they never enter structural
 rounds. An unmatched member is therefore reported as `unknown`, not added or
 removed, when its own signature was not decoded or when the other side has an

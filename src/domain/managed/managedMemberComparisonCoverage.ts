@@ -107,8 +107,8 @@ export const comparisonLimitations = (
 ): string[] => {
   const limitations: string[] = [
     "Metadata tokens are build-local coordinates; matched pairs are remaps, not persistent identities.",
-    "Methods pair by exact CIL/signature, then declared type, name, and signature, then structural shape; names alone are never a matching basis.",
-    "Fields pair by exact signature, then declared type, name, and signature; an undecoded signature is compared only by its raw bytes, and an unmatched member with one stays unknown.",
+    "Methods pair by declared type, name, and exact CIL/signature, then declared type, name, and signature, then exact CIL/signature or structural shape alone; a pair across declared types or names is not made while either member's own declared type and name remain unpaired on the other side, and names alone are never a matching basis.",
+    "Fields pair by declared type, name, and signature, then exact decoded signature alone under the same cross-identity rule; an undecoded signature is compared only by its raw bytes, and an unmatched member with one stays unknown.",
   ];
   if (left.coverage.state !== "complete" || right.coverage.state !== "complete")
     limitations.push("At least one managed member observation is partial.");

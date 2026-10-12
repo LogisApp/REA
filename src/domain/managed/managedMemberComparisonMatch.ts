@@ -123,15 +123,24 @@ const matchMethods = (
   matchByKeys({
     left,
     right,
-    exactBasis: "exact-il-signature",
-    fallbackBases: [
+    rounds: [
+      {
+        basis: "exact-il-signature",
+        key: declaredAs(({ exactKey }) => exactKey),
+      },
       {
         basis: "exact-signature",
         key: ({ signatureKey }) => signatureKey,
       },
       {
+        basis: "exact-il-signature",
+        key: ({ exactKey }) => exactKey,
+        remap: true,
+      },
+      {
         basis: "structural-method-shape",
         key: ({ structuralKey }) => structuralKey,
+        remap: true,
       },
     ],
   });
@@ -143,11 +152,19 @@ const matchFields = (
   matchByKeys({
     left,
     right,
-    exactBasis: "field-signature",
-    fallbackBases: [
+    rounds: [
+      {
+        basis: "field-signature",
+        key: declaredAs(({ exactKey }) => exactKey),
+      },
       {
         basis: "exact-signature",
         key: ({ signatureKey }) => signatureKey,
+      },
+      {
+        basis: "field-signature",
+        key: ({ exactKey }) => exactKey,
+        remap: true,
       },
     ],
   });
@@ -155,21 +172,43 @@ const matchFields = (
 export type ManagedMethodMatches = ReturnType<typeof matchMethods>;
 export type ManagedFieldMatches = ReturnType<typeof matchFields>;
 
+interface Member {
+  readonly declaring_type: string | null;
+  readonly name: string;
+}
+
+interface MatchRound<Item> {
+  readonly basis: ConcreteMatchBasis;
+  readonly key: (item: Keyed<Item>) => string | null;
+  /**
+   * The key omits the declared type and name, so a pair may join different
+   * declared identities. Such a remap is skipped when either member's own
+   * identity is still unpaired on the other side.
+   */
+  readonly remap?: true;
+}
+
 interface MatchByKeysInput<Item> {
   readonly left: readonly Keyed<Item>[];
   readonly right: readonly Keyed<Item>[];
-  readonly exactBasis: ConcreteMatchBasis;
-  readonly fallbackBases: readonly {
-    readonly basis: ConcreteMatchBasis;
-    readonly key: (item: Keyed<Item>) => string | null;
-  }[];
+  readonly rounds: readonly MatchRound<Item>[];
 }
 
-const matchByKeys = <Item>({
+const identityOf = ({ declaring_type, name }: Member): string =>
+  sha256([declaring_type, name]);
+
+/** Narrow a key to members of one declared type and name. */
+const declaredAs =
+  <Item extends Member>(key: (item: Keyed<Item>) => string | null) =>
+  (item: Keyed<Item>): string | null => {
+    const value = key(item);
+    return value === null ? null : sha256([identityOf(item.item), value]);
+  };
+
+const matchByKeys = <Item extends Member>({
   left,
   right,
-  exactBasis,
-  fallbackBases,
+  rounds,
 }: MatchByKeysInput<Item>): {
   readonly pairs: readonly MatchedPair<Item>[];
   readonly ambiguous: readonly Ambiguous<Item>[];
@@ -180,13 +219,6 @@ const matchByKeys = <Item>({
   const usedRight = new Set<Keyed<Item>>();
   const pairs: MatchedPair<Item>[] = [];
   const ambiguous: Ambiguous<Item>[] = [];
-  const rounds: readonly {
-    readonly basis: ConcreteMatchBasis;
-    readonly key: (item: Keyed<Item>) => string | null;
-  }[] = [
-    { basis: exactBasis, key: ({ exactKey }) => exactKey },
-    ...fallbackBases,
-  ];
   for (const round of rounds) {
     const leftGroups = groupBy(
       left.filter((item) => !usedLeft.has(item)),
@@ -196,6 +228,12 @@ const matchByKeys = <Item>({
       right.filter((item) => !usedRight.has(item)),
       round.key,
     );
+    // Identities still unpaired as the round starts, so remaps within one
+    // round do not depend on the order in which their groups are visited.
+    const open =
+      round.remap === true
+        ? { left: unpaired(left, usedLeft), right: unpaired(right, usedRight) }
+        : null;
     for (const [key, leftItems] of leftGroups) {
       const rightItems = rightGroups.get(key);
       if (rightItems === undefined) continue;
@@ -203,6 +241,13 @@ const matchByKeys = <Item>({
         const [leftItem] = leftItems;
         const [rightItem] = rightItems;
         if (leftItem === undefined || rightItem === undefined) continue;
+        if (
+          open !== null &&
+          identityOf(leftItem.item) !== identityOf(rightItem.item) &&
+          (open.right.has(identityOf(leftItem.item)) ||
+            open.left.has(identityOf(rightItem.item)))
+        )
+          continue;
         usedLeft.add(leftItem);
         usedRight.add(rightItem);
         pairs.push({
@@ -235,6 +280,15 @@ const matchByKeys = <Item>({
   };
 };
 
+/** Declared identities of the members no earlier pair or group has taken. */
+const unpaired = <Item extends Member>(
+  items: readonly Keyed<Item>[],
+  used: ReadonlySet<Keyed<Item>>,
+): ReadonlySet<string> =>
+  new Set(
+    items.filter((item) => !used.has(item)).map(({ item }) => identityOf(item)),
+  );
+
 const groupBy = <Item>(
   items: readonly Item[],
   keyOf: (item: Item) => string | null,
@@ -263,7 +317,7 @@ const observedBy =
  * the other side's selection stays one-sided, so a type selection never yields
  * a remap to a member of a type the other side did not inspect.
  */
-const matchObserved = <Item extends { readonly declaring_type: string | null }>(
+const matchObserved = <Item extends Member>(
   left: readonly Item[],
   right: readonly Item[],
   sides: {

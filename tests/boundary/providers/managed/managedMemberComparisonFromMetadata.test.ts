@@ -47,7 +47,7 @@ describe("managed member comparison", () => {
       }),
     ]);
     expect(result.limitations).toContain(
-      "Methods pair by exact CIL/signature, then declared type, name, and signature, then structural shape; names alone are never a matching basis.",
+      "Methods pair by declared type, name, and exact CIL/signature, then declared type, name, and signature, then exact CIL/signature or structural shape alone; a pair across declared types or names is not made while either member's own declared type and name remain unpaired on the other side, and names alone are never a matching basis.",
     );
     expect(
       managedMemberComparisonResultSchema.safeParse({
@@ -222,10 +222,12 @@ describe("managed member comparison uncertainty", () => {
     const rightField = right.result.fields[0];
     expect(rightField).toBeDefined();
     if (rightField === undefined) return;
+    // Both right fields are renamed, so neither left field keeps its declared
+    // identity and only the shared signature links them.
     const duplicatedRight = {
       ...right.result,
       fields: [
-        rightField,
+        { ...rightField, name: "moved" },
         {
           ...rightField,
           token: "0x04000002",
@@ -528,6 +530,189 @@ describe("managed member comparison of selected types", () => {
     );
   });
 });
+
+describe("managed member comparison of one signature in several types", () => {
+  it("pairs a file with itself when two types hold identical members", () => {
+    const inspected = withTwin(
+      inspect(buildManagedPeFixture(), "/tmp/twin.dll"),
+    );
+    const result = compareManagedMembers(inspected, inspected);
+
+    expect(result.matching.ambiguous).toBe(0);
+    expect(result.summary).toMatchObject({
+      unchanged: 4,
+      changed: 0,
+      added: 0,
+      removed: 0,
+      unknown: 0,
+    });
+    for (const item of [...result.methods, ...result.fields])
+      expect(item.right?.token).toBe(item.left?.token);
+  });
+
+  it.each([1, 2])(
+    "keeps a member with its own changed counterpart beside %i identical members of other types",
+    (twins) => {
+      const left = inspect(buildManagedPeFixture(), "/tmp/own-before.dll");
+      const changed = withTwin(
+        inspect(
+          buildManagedPeFixture({
+            ilBody: Buffer.from([
+              0x32, 0x02, 0x7b, 0x02, 0x00, 0x00, 0x04, 0x28, 0x02, 0x00, 0x00,
+              0x0a, 0x2a,
+            ]),
+          }),
+          "/tmp/own-after.dll",
+        ),
+        left,
+        twins,
+      );
+      const result = compareManagedMembers(left, changed);
+
+      expect(result.methods).toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({
+            status: "changed",
+            left: expect.objectContaining({
+              declaring_type: "Fixture.Program",
+            }),
+            right: expect.objectContaining({
+              declaring_type: "Fixture.Program",
+            }),
+            match: expect.objectContaining({ basis: "exact-signature" }),
+            dimensions: expect.arrayContaining(["cil"]),
+          }),
+          expect.objectContaining({
+            status: "added",
+            right: expect.objectContaining({ declaring_type: "Other.Twin" }),
+          }),
+        ]),
+      );
+      expect(result.fields).toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({
+            status: "unchanged",
+            left: expect.objectContaining({
+              declaring_type: "Fixture.Program",
+            }),
+            right: expect.objectContaining({
+              declaring_type: "Fixture.Program",
+            }),
+          }),
+          expect.objectContaining({
+            status: "added",
+            right: expect.objectContaining({ declaring_type: "Other.Twin" }),
+          }),
+        ]),
+      );
+      expect(result.summary).toMatchObject({ unknown: 0, removed: 0 });
+    },
+  );
+
+  it("does not remap a member whose own identity remains on the other side", () => {
+    const left = inspect(buildManagedPeFixture(), "/tmp/sig-before.dll");
+    const changed = withTwin(
+      inspect(
+        buildManagedPeFixture({
+          methodSignature: Buffer.from([0x00, 0x00, 0x08]),
+          fieldSignature: Buffer.from([0x06, 0x0a]),
+        }),
+        "/tmp/sig-after.dll",
+      ),
+      left,
+    );
+    // Either side may hold the member whose own identity is left behind.
+    const forward = compareManagedMembers(left, changed);
+    const backward = compareManagedMembers(changed, left);
+
+    for (const item of [
+      ...forward.methods,
+      ...forward.fields,
+      ...backward.methods,
+      ...backward.fields,
+    ])
+      expect(item.match.status).not.toBe("matched");
+    expect(forward.summary).toMatchObject({ removed: 2, added: 4 });
+    expect(backward.summary).toMatchObject({ removed: 4, added: 2 });
+  });
+
+  it("does not remap by structural shape a method whose own identity remains on the other side", () => {
+    const left = inspect(buildManagedPeFixture(), "/tmp/shape-before.dll");
+    const changed = withTwin(
+      inspect(
+        buildManagedPeFixture({
+          methodSignature: Buffer.from([0x00, 0x00, 0x08]),
+        }),
+        "/tmp/shape-after.dll",
+      ),
+      left,
+    );
+    const [own, twin] = changed.result.methods;
+    if (own === undefined || twin === undefined)
+      throw new Error("Expected two methods");
+    // Same body shape, different CIL digest: only the structural round links
+    // the left method to the twin.
+    const result = compareManagedMembers(left, {
+      ...changed,
+      result: {
+        ...changed.result,
+        methods: [
+          own,
+          {
+            ...twin,
+            body: { ...twin.body, normalized_il_sha256: "0".repeat(64) },
+          },
+        ],
+      },
+    });
+
+    for (const item of result.methods)
+      expect(item.match.status).not.toBe("matched");
+  });
+});
+
+/**
+ * Add copies of the fixture's method and field, each pair declared by another
+ * type, to an inspection. The copies come from `source`, so they can carry
+ * the bytes of a different build than the inspection they join.
+ */
+const withTwin = (
+  inspected: ReturnType<typeof inspect>,
+  source: ReturnType<typeof inspect> = inspected,
+  count = 1,
+): ReturnType<typeof inspect> => {
+  const [method] = source.result.methods;
+  const [field] = source.result.fields;
+  if (method === undefined || field === undefined)
+    throw new Error("Expected a fixture method and field");
+  const rows = Array.from({ length: count }, (_, index) => index + 2);
+  const twin = (row: number) => ({
+    declaring_type: row === 2 ? "Other.Twin" : `Other.Twin${String(row)}`,
+    declaring_type_token: `0x0200000${String(row + 1)}`,
+  });
+  return {
+    ...inspected,
+    result: {
+      ...inspected.result,
+      methods: [
+        ...inspected.result.methods,
+        ...rows.map((row) => ({
+          ...method,
+          ...twin(row),
+          token: `0x0600000${String(row)}`,
+        })),
+      ],
+      fields: [
+        ...inspected.result.fields,
+        ...rows.map((row) => ({
+          ...field,
+          ...twin(row),
+          token: `0x0400000${String(row)}`,
+        })),
+      ],
+    },
+  };
+};
 
 const inspect = (bytes: Buffer, path: string, typeNames?: string[]) => {
   const target = managedPeFixtureTarget(bytes, path);
