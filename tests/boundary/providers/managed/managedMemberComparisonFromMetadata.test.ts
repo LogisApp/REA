@@ -764,6 +764,42 @@ describe("managed member comparison remaps around kept identities", () => {
 });
 
 describe("managed member comparison of unresolved and held identities", () => {
+  it("does not remap past an unresolved member that may be the counterpart", () => {
+    const base = inspect(buildManagedPeFixture(), "/tmp/orphan-copy.dll");
+    const [method] = base.result.methods;
+    if (method === undefined) throw new Error("Expected a fixture method");
+    const left = { ...base, result: { ...base.result, fields: [] } };
+    // The right keeps Main with an unresolved owner, and an identical copy
+    // in another type; either could be the left Main.
+    const right = {
+      ...base,
+      result: {
+        ...base.result,
+        methods: [
+          { ...method, declaring_type: null, declaring_type_token: null },
+          {
+            ...method,
+            declaring_type: "Other.Twin",
+            declaring_type_token: "0x02000003",
+            name: "Copy",
+            token: "0x06000002",
+          },
+        ],
+        fields: [],
+      },
+    };
+
+    for (const result of [
+      compareManagedMembers(left, right),
+      compareManagedMembers(right, left),
+    ]) {
+      expect(
+        result.methods.filter(({ match }) => match.status === "matched"),
+      ).toEqual([]);
+      expect(result.summary).toMatchObject({ added: 0, removed: 0 });
+    }
+  });
+
   it("does not pair members of unresolved types under different names", () => {
     const base = inspect(buildManagedPeFixture(), "/tmp/orphan-names.dll");
     const [method] = base.result.methods;

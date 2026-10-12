@@ -208,6 +208,7 @@ const absenceLimitations = (
         `signature-not-decoded: The member's ${member.signature.parse_status} signature was compared only by exact declared type, name, and raw bytes, so a changed or renamed counterpart could not be sought.`,
       ]),
   ...(member.signature.parse_status === "decoded" &&
+  opposite.oppositeUndecodedNames.size > 0 &&
   opposite.oppositeUndecodedNames.has(identityOf(member))
     ? [
         `counterpart-signature-not-decoded: The ${opposite.opposite} ${opposite.inventory} inventory has an unpaired member with the same declared type and name whose signature was not decoded, so it may be this member with a changed signature.`,
@@ -219,19 +220,24 @@ const absenceLimitations = (
  * Declared names of unpaired members whose signature was not decoded: one-sided
  * members and candidates of ambiguous groups, which also remain unpaired.
  */
+interface Unpaired {
+  readonly item: Method | Field;
+  readonly identity: string;
+}
+
 const undecodedOneSidedNames = (members: {
-  readonly leftOnly: readonly { readonly item: Method | Field }[];
-  readonly rightOnly: readonly { readonly item: Method | Field }[];
+  readonly leftOnly: readonly Unpaired[];
+  readonly rightOnly: readonly Unpaired[];
   readonly ambiguous: readonly {
-    readonly left: readonly { readonly item: Method | Field }[];
-    readonly right: readonly { readonly item: Method | Field }[];
+    readonly left: readonly Unpaired[];
+    readonly right: readonly Unpaired[];
   }[];
 }): UndecodedOneSidedNames => {
-  const names = (side: readonly { readonly item: Method | Field }[]) =>
+  const names = (side: readonly Unpaired[]) =>
     new Set(
       side
         .filter(({ item }) => item.signature.parse_status !== "decoded")
-        .map(({ item }) => identityOf(item)),
+        .map(({ identity }) => identity),
     );
   return {
     left: names([

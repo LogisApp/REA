@@ -186,8 +186,8 @@ interface MatchRound<Item> {
   /**
    * The key omits the declared type and name, so a pair joins different
    * declared identities; same-identity pairs were taken by earlier rounds.
-   * A member whose own identity is still unpaired on the other side, or whose
-   * declaring type is unresolved, does not take part.
+   * A member whose own identity is still unpaired on the other side does not
+   * take part, and a group with a member of an unresolved type stays ambiguous.
    */
   readonly remap?: true;
 }
@@ -248,7 +248,14 @@ const matchByKeys = <Item extends Declared>({
     for (const [key, leftItems] of leftGroups) {
       const rightItems = rightGroups.get(key);
       if (rightItems === undefined) continue;
-      if (leftItems.length === 1 && rightItems.length === 1) {
+      // An unresolved owner may be either member's own counterpart, so a
+      // remap group it joins stays ambiguous.
+      const refused =
+        round.remap === true &&
+        [...leftItems, ...rightItems].some(
+          ({ item }) => item.declaring_type === null,
+        );
+      if (!refused && leftItems.length === 1 && rightItems.length === 1) {
         const [leftItem] = leftItems;
         const [rightItem] = rightItems;
         if (leftItem === undefined || rightItem === undefined) continue;
@@ -296,19 +303,16 @@ const unpairedOf = <Item>(
 ): Keyed<Item>[] => items.filter((item) => !paired.has(item));
 
 /**
- * Members a remap round may pair: a resolved declaring type, and no member of
- * the same declared identity left unpaired on the other side, whether one-sided
- * or in an ambiguous group. The sets are taken before grouping, so no group
- * order decides a remap.
+ * Members a remap round may group: no member of the same declared identity
+ * left unpaired on the other side, whether one-sided or in an ambiguous group.
+ * The sets are taken before grouping, so no group order decides a remap.
  */
-const remappable = <Item extends Declared>(
+const remappable = <Item>(
   items: readonly Keyed<Item>[],
   others: readonly Keyed<Item>[],
 ): Keyed<Item>[] => {
   const kept = new Set(others.map(({ identity }) => identity));
-  return items.filter(
-    ({ item, identity }) => item.declaring_type !== null && !kept.has(identity),
-  );
+  return items.filter(({ identity }) => !kept.has(identity));
 };
 
 const groupBy = <Item>(
