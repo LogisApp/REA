@@ -57,9 +57,10 @@ paths, executable digests, exact banners and arguments. Executable digests are
 checked again after each command. Caller-supplied tools are trusted programs;
 version and digest recording are not publisher authentication or an OS sandbox.
 Each subprocess has a 30-second deadline and 32 MiB combined output budget.
-Output past the budget fails with `resource_constraint` and keeps only the first
-4,096 characters of each stream. All commands use existing owned-process
-cancellation and cleanup. Workspace cleanup failures remain explicit errors with resource paths.
+Output past the budget fails with `resource_constraint`. Its captured output
+keeps the first 4,096 bytes of each stream and each stream's observed size.
+All commands use existing owned-process cancellation and cleanup. Workspace
+cleanup failures remain explicit errors with resource paths.
 
 WAT is a decoded representation, not original source or proof of runtime
 behavior. Custom annotations can preserve payloads, but WAT does not establish original
