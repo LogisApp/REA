@@ -1,6 +1,8 @@
 import { DOMParser, normalizeLineEndings } from "@xmldom/xmldom";
 import { parse } from "plist";
 
+import { MAX_PLIST_DEPTH } from "./apple/plistValue.js";
+
 /** The dictionary key REA results cannot carry: validation strips it. */
 const PROTOTYPE_KEY = "__proto__";
 
@@ -88,10 +90,66 @@ export const parseXmlPropertyList = (
   // by app Info.plist resolution. Only XML needs the key-element substitution.
   const first = text.trimStart()[0];
   if (first === "{" || first === "(") return omitPrototypeKeys(parse(text));
-  const { substituted, placeholder } = substitutePrototypeKeys(
-    normalizeLineEndings(text),
-  );
+  // Normalize only the literal line endings the pinned decoder normalizes.
+  // Preserve character references in the source: serializing a DOM would turn
+  // e.g. an encoded carriage return into a literal newline on the second parse.
+  const normalized = normalizeLineEndings(text);
+  assertXmlPlistDepthWithinLimit(normalized);
+  const { substituted, placeholder } = substitutePrototypeKeys(normalized);
   return withoutKey(parse(substituted), placeholder);
+};
+
+/** XML tokens that can change element nesting, mirroring decoder preflights. */
+const XML_TOKEN =
+  /<!--[^]*?-->|<!\[CDATA\[[^]*?\]\]>|<!DOCTYPE[^>]*>|<\?[^]*?\?>|<\/?[A-Za-z][^>]*>/giu;
+
+/** Elements whose members are plist values nested inside them. */
+const PLIST_CONTAINER_ELEMENTS = new Set(["dict", "array"]);
+
+/**
+ * Reject XML plists nested deeper than the projection supports before any
+ * recursive pass runs. `plist` and the prototype-key traversal recurse once
+ * per nesting level, so a deeply nested document exhausts the call stack
+ * before the projection limit can report the resource bound. The failure
+ * matches `projectPlistValue` so callers classify it as a limit failure.
+ *
+ * Depth counts values the way the projection does: the root value is level 0
+ * and every container member is one level deeper. A dictionary key names a
+ * member instead of nesting one, and a self-closing element is the value at
+ * its own level.
+ */
+export const assertXmlPlistDepthWithinLimit = (text: string): void => {
+  const memberDepths: number[] = [];
+  let deepest = 0;
+  for (const match of text.matchAll(XML_TOKEN)) {
+    const token = match[0] ?? "";
+    if (
+      token.startsWith("<!--") ||
+      token.startsWith("<![CDATA[") ||
+      token.startsWith("<!DOCTYPE") ||
+      token.startsWith("<?")
+    )
+      continue;
+    const closing = token.startsWith("</");
+    const name = token.slice(closing ? 2 : 1).split(/[\s/>]/u)[0] ?? "";
+    if (closing) {
+      // A close without a matching open leaves malformed input for the
+      // decoder to reject; only well-formed nesting reaches the limit.
+      if (PLIST_CONTAINER_ELEMENTS.has(name)) memberDepths.pop();
+      continue;
+    }
+    const depth =
+      memberDepths.length === 0
+        ? 0
+        : (memberDepths[memberDepths.length - 1] ?? 0) + 1;
+    if (name !== "key" && depth > deepest) deepest = depth;
+    if (PLIST_CONTAINER_ELEMENTS.has(name) && !token.endsWith("/>"))
+      memberDepths.push(depth);
+  }
+  if (deepest > MAX_PLIST_DEPTH)
+    throw new RangeError(
+      `Plist exceeds ${String(MAX_PLIST_DEPTH)} nesting levels`,
+    );
 };
 
 /** Locate keys with the same XML parser and first-child semantics as plist. */
