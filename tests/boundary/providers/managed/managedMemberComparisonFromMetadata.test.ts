@@ -47,7 +47,7 @@ describe("managed member comparison", () => {
       }),
     ]);
     expect(result.limitations).toContain(
-      "Methods pair by declared type, name, and exact CIL/signature, then declared type, name, and signature, then exact CIL/signature or structural shape alone; a pair across declared types or names is not made while either member's own declared type and name remain unpaired on the other side, and names alone are never a matching basis.",
+      "Methods pair within one declared type and name by exact CIL/signature, then signature, then structural shape; only then may exact CIL/signature or structural shape alone remap across declared types or names, never taking a member whose own declared type and name remain unpaired on the other side or whose declaring type is unresolved. Names alone are never a matching basis.",
     );
     expect(
       managedMemberComparisonResultSchema.safeParse({
@@ -250,6 +250,9 @@ describe("managed member comparison uncertainty", () => {
           candidate_left_tokens: ["0x04000001", "0x04000002"],
           candidate_right_tokens: ["0x04000001", "0x04000002"],
         }),
+        limitations: [
+          "Multiple managed fields share the same signature; REA did not guess a token remap.",
+        ],
       }),
     ]);
   });
@@ -443,7 +446,7 @@ describe("managed member comparison of ambiguous undecoded signatures", () => {
             basis: "exact-il-signature",
           }),
           limitations: [
-            "Multiple managed methods share the same non-name identity key; REA did not guess a token remap.",
+            "Multiple managed methods share the same CIL and signature; REA did not guess a token remap.",
           ],
         }),
         expect.objectContaining({
@@ -668,6 +671,128 @@ describe("managed member comparison of one signature in several types", () => {
 
     for (const item of result.methods)
       expect(item.match.status).not.toBe("matched");
+  });
+});
+
+describe("managed member comparison remaps around kept identities", () => {
+  it("does not hide a member whose own identity remains in an ambiguous remap group", () => {
+    const left = inspect(buildManagedPeFixture(), "/tmp/group-before.dll");
+    const changed = withTwin(
+      inspect(
+        buildManagedPeFixture({
+          methodSignature: Buffer.from([0x00, 0x00, 0x08]),
+          fieldSignature: Buffer.from([0x06, 0x0a]),
+        }),
+        "/tmp/group-after.dll",
+      ),
+      left,
+      2,
+    );
+    const result = compareManagedMembers(left, changed);
+
+    expect(result.matching.ambiguous).toBe(0);
+    expect(result.summary).toMatchObject({ removed: 2, added: 6 });
+  });
+
+  it("remaps to the one candidate whose own identity is not kept elsewhere", () => {
+    const base = inspect(buildManagedPeFixture(), "/tmp/kept-base.dll");
+    const changedSignature = inspect(
+      buildManagedPeFixture({
+        methodSignature: Buffer.from([0x00, 0x00, 0x08]),
+      }),
+      "/tmp/kept-signature.dll",
+    );
+    // Left: Fixture.Program.Main, plus Other.Twin.Main with another signature.
+    const left = withTwin(base, changedSignature);
+    // Right: Other.Twin.Main and Other.Twin3.Main, both identical to the
+    // left Fixture.Program.Main, which the right no longer has.
+    const twins = withTwin(base, base, 2);
+    const right = {
+      ...twins,
+      result: { ...twins.result, methods: twins.result.methods.slice(1) },
+    };
+    const result = compareManagedMembers(left, right);
+
+    expect(result.methods).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          left: expect.objectContaining({ declaring_type: "Fixture.Program" }),
+          right: expect.objectContaining({ declaring_type: "Other.Twin3" }),
+          match: expect.objectContaining({
+            status: "matched",
+            basis: "exact-il-signature",
+          }),
+        }),
+      ]),
+    );
+    expect(
+      result.methods.filter(({ match }) => match.status === "ambiguous"),
+    ).toEqual([]);
+  });
+
+  it("names the shared structural shape of an ambiguous remap group", () => {
+    const base = inspect(buildManagedPeFixture(), "/tmp/shape-group.dll");
+    const twins = withTwin(base, base, 2);
+    // Two right methods share the left method's shape but not its CIL digest,
+    // and the right no longer declares the left method's identity.
+    const right = {
+      ...twins,
+      result: {
+        ...twins.result,
+        methods: twins.result.methods.slice(1).map((method) => ({
+          ...method,
+          body: { ...method.body, normalized_il_sha256: "0".repeat(64) },
+        })),
+        fields: [],
+      },
+    };
+    const left = { ...base, result: { ...base.result, fields: [] } };
+    const result = compareManagedMembers(left, right);
+
+    expect(result.methods).toEqual([
+      expect.objectContaining({
+        match: expect.objectContaining({
+          status: "ambiguous",
+          basis: "structural-method-shape",
+        }),
+        limitations: [
+          "Multiple managed methods share the same structural shape; REA did not guess a token remap.",
+        ],
+      }),
+    ]);
+  });
+
+  it("does not remap a member whose declaring type is unresolved", () => {
+    const base = inspect(buildManagedPeFixture(), "/tmp/orphan.dll");
+    const [method] = base.result.methods;
+    if (method === undefined) throw new Error("Expected a fixture method");
+    const left = {
+      ...base,
+      result: {
+        ...base.result,
+        methods: [
+          { ...method, declaring_type: null, declaring_type_token: null },
+        ],
+        fields: [],
+      },
+    };
+    const right = {
+      ...base,
+      result: {
+        ...base.result,
+        methods: [
+          { ...method, declaring_type: "Other.Twin", token: "0x06000002" },
+        ],
+        fields: [],
+      },
+    };
+
+    for (const result of [
+      compareManagedMembers(left, right),
+      compareManagedMembers(right, left),
+    ])
+      for (const item of result.methods)
+        expect(item.match.status).not.toBe("matched");
   });
 });
 

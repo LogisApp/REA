@@ -296,8 +296,9 @@ const fieldOnlyItem = (
 };
 
 /**
- * Name the identity key an ambiguous group shares. The exact-signature key
- * already includes the declared type and name, so names cannot separate it.
+ * Name the evidence an ambiguous group shares. A group of one basis can come
+ * from a round keyed with or without the declared type and name, so only the
+ * exact-signature basis, which always includes them, names them.
  */
 const ambiguityLimitation = (
   members: "methods" | "fields",
@@ -305,9 +306,11 @@ const ambiguityLimitation = (
 ): string =>
   basis === "exact-signature"
     ? `Multiple managed ${members} share the same declared type, name, and raw signature; REA did not guess a token remap.`
-    : members === "methods"
-      ? "Multiple managed methods share the same non-name identity key; REA did not guess a token remap."
-      : "Multiple managed fields share the same signature; REA did not guess a token remap from names.";
+    : basis === "exact-il-signature"
+      ? "Multiple managed methods share the same CIL and signature; REA did not guess a token remap."
+      : members === "methods"
+        ? "Multiple managed methods share the same structural shape; REA did not guess a token remap."
+        : "Multiple managed fields share the same signature; REA did not guess a token remap.";
 
 export const buildMethodItems = (
   matches: ManagedMethodMatches,
