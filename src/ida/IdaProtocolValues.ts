@@ -210,11 +210,18 @@ export const legacyCalleesSchema = z.array(
 );
 
 /** Parsed database lifecycle observations retain explicit ownership information. */
+/** Upstream ida-pro-mcp #551 uses a new UUID4 hex token for every owned open generation. */
+export const idaReleaseIdSchema = z.string().regex(/^[a-f0-9]{32}$/u);
+
 export const openDatabaseSchema = z
   .object({
     success: z.literal(true),
     session: z
-      .object({ session_id: z.string().min(1), input_path: z.string().min(1) })
+      .object({
+        session_id: z.string().min(1),
+        input_path: z.string().min(1),
+        release_id: idaReleaseIdSchema.optional(),
+      })
       .passthrough(),
   })
   .passthrough();
@@ -233,6 +240,15 @@ export const databaseListSchema = z
     ),
   })
   .passthrough();
+/** PR #551 strict discovery must explicitly prove its registry scan completed. */
+export const strictDatabaseListSchema = databaseListSchema
+  .extend({
+    count: z.number().int().nonnegative(),
+    registry_scan_complete: z.literal(true),
+  })
+  .refine((value) => value.count === value.sessions.length, {
+    message: "IDA strict discovery reported an inconsistent session count.",
+  });
 export const closeDatabaseSchema = z
   .object({
     success: z.literal(true),
@@ -242,8 +258,17 @@ export const closeDatabaseSchema = z
     backend: z.enum(["worker", "gui"]),
   })
   .passthrough();
-/** Supervisor response when the requested worker was already reaped. */
-export const absentDatabaseCloseSchema = (sessionId: string) =>
-  z
-    .object({ error: z.literal(`Session not found: ${sessionId}`) })
-    .passthrough();
+/** Verified, terminated owned-worker receipt from ida-pro-mcp PR #551 (not legacy inventory). */
+export const idaWorkerReleaseSchema = z
+  .object({
+    status: z.literal("terminated"),
+    verified: z.literal(true),
+    session_id: z.string().min(1),
+    input_path: z.string().min(1),
+    release_id: idaReleaseIdSchema,
+    backend: z.literal("worker"),
+    owned: z.literal(true),
+    worker_pid: z.number().int().positive(),
+    exit_code: z.number().int(),
+  })
+  .passthrough();
