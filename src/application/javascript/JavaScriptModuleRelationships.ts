@@ -31,6 +31,7 @@ import {
 } from "./JavaScriptArtifactGraphEvidence.js";
 import {
   moduleKindForJavaScriptReference,
+  moduleResolutionModeProperties,
   resolveArtifactPathByContext,
   type ArtifactPathResolution,
 } from "./JavaScriptArtifactPathResolution.js";
@@ -102,7 +103,10 @@ export const addJavaScriptSourceModules = (
             logical_module_key: file.path,
             module_format: moduleFormat(file.path, semantic.ir),
             import_relationships: semantic.ir.moduleLinks.filter(
-              ({ kind }) => kind === "import" || kind === "require",
+              ({ kind }) =>
+                kind === "import" ||
+                kind === "require" ||
+                kind === "type-import",
             ).length,
             export_relationships: exports.length,
             export_names: retainedExports,
@@ -156,7 +160,12 @@ export function* addJavaScriptModuleRelationshipsSteps(
       else if (link.specifier !== null)
         addImportRelationship(input, source, omissions, {
           specifier: link.specifier,
-          importedPath: link.importedName === null ? [] : [link.importedName],
+          importedPath:
+            link.importedName === null
+              ? []
+              : link.kind === "type-import"
+                ? link.importedName.split(".")
+                : [link.importedName],
         });
     }
   }
@@ -281,6 +290,7 @@ const resolveModuleTarget = (
       input.link.kind === "require" || input.link.kind === "commonjs-export"
         ? "require"
         : "static-import",
+      input.link.resolutionMode,
     ),
   });
   if (resolution.resolution_status !== "resolved")
@@ -373,6 +383,7 @@ const relationshipProperties = (
   origin?: JavaScriptModuleOrigin,
 ) => ({
   module_link_kind: link.kind,
+  ...moduleResolutionModeProperties(link.resolutionMode),
   specifier: origin?.specifier ?? link.specifier,
   imported_name: origin?.importedPath.at(-1) ?? link.importedName,
   imported_path: origin?.importedPath ?? [],

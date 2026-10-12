@@ -27,15 +27,17 @@ const withRuntime = <
   Value extends {
     module_runtime?: string | undefined;
     resolution_basis?: "wrapper-substitution" | undefined;
+    resolution_mode?: "import" | "require" | undefined;
   },
 >(
   value: Value,
 ) => {
-  const { module_runtime, resolution_basis, ...rest } = value;
+  const { module_runtime, resolution_basis, resolution_mode, ...rest } = value;
   return {
     ...rest,
     ...(module_runtime === undefined ? {} : { module_runtime }),
     ...(resolution_basis === undefined ? {} : { resolution_basis }),
+    ...(resolution_mode === undefined ? {} : { resolution_mode }),
   };
 };
 const staticValue = z.discriminatedUnion("status", [
@@ -280,8 +282,10 @@ const electron = z
   }));
 const referenceShape = {
   ...findingContext,
+  resolution_mode: z.enum(["import", "require"]).optional(),
   kind: z.enum([
     "static-import",
+    "type-import",
     "dynamic-import",
     "require",
     "worker",
@@ -471,7 +475,16 @@ const semanticValue: z.ZodType<JavaScriptSemanticValue> = z.lazy(() =>
       };
     }),
 );
-const origin = z.strictObject({ specifier: z.string(), importedPath: strings });
+const origin = z
+  .strictObject({
+    specifier: z.string(),
+    importedPath: strings,
+    resolutionMode: z.enum(["import", "require"]).optional(),
+  })
+  .transform(({ resolutionMode, ...rest }) => ({
+    ...rest,
+    ...(resolutionMode === undefined ? {} : { resolutionMode }),
+  }));
 const provenance = z.discriminatedUnion("status", [
   z.strictObject({
     status: z.literal("module"),
@@ -519,15 +532,28 @@ const coverage = z
       ...(resourceLimits === undefined ? {} : { resourceLimits }),
     };
   });
-const moduleLink = z.strictObject({
-  kind: z.enum(["import", "require", "export", "re-export", "commonjs-export"]),
-  specifier: z.string().nullable(),
-  importedName: z.string().nullable(),
-  localName: z.string().nullable(),
-  exportedName: z.string().nullable(),
-  callableId: z.string().nullable(),
-  location: range,
-});
+const moduleLink = z
+  .strictObject({
+    resolutionMode: z.enum(["import", "require"]).optional(),
+    kind: z.enum([
+      "import",
+      "type-import",
+      "require",
+      "export",
+      "re-export",
+      "commonjs-export",
+    ]),
+    specifier: z.string().nullable(),
+    importedName: z.string().nullable(),
+    localName: z.string().nullable(),
+    exportedName: z.string().nullable(),
+    callableId: z.string().nullable(),
+    location: range,
+  })
+  .transform(({ resolutionMode, ...rest }) => ({
+    ...rest,
+    ...(resolutionMode === undefined ? {} : { resolutionMode }),
+  }));
 const definitionKind = z.enum([
   "import",
   "variable",

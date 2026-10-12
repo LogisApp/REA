@@ -1,4 +1,8 @@
 import * as t from "@babel/types";
+import {
+  typescriptImportResolutionMode,
+  typescriptImportTypeName,
+} from "./typescriptImportResolutionMode.js";
 
 import type {
   JavaScriptSemanticBinding,
@@ -71,11 +75,28 @@ export const collectSemanticModuleLink = (
 ): void => {
   if (t.isTSImportEqualsDeclaration(node)) collectImportEquals(node, state);
   else if (t.isImportDeclaration(node)) collectImports(node, state);
-  else if (t.isExportAllDeclaration(node))
+  else if (t.isTSImportType(node) && t.isStringLiteral(node.source)) {
+    const resolutionMode = typescriptImportResolutionMode(node);
+    addModuleLink(
+      state,
+      {
+        kind: "type-import",
+        specifier: node.source.value,
+        importedName: typescriptImportTypeName(node),
+        localName: null,
+        exportedName: null,
+        ...(resolutionMode === undefined ? {} : { resolutionMode }),
+        location: range(node),
+      },
+      node,
+    );
+  } else if (t.isExportAllDeclaration(node)) {
+    const resolutionMode = typescriptImportResolutionMode(node);
     addModuleLink(
       state,
       {
         kind: "re-export",
+        ...(resolutionMode === undefined ? {} : { resolutionMode }),
         specifier: node.source.value,
         importedName: "*",
         localName: null,
@@ -84,7 +105,7 @@ export const collectSemanticModuleLink = (
       },
       node,
     );
-  else if (t.isExportNamedDeclaration(node)) collectNamedExports(node, state);
+  } else if (t.isExportNamedDeclaration(node)) collectNamedExports(node, state);
   else if (t.isExportDefaultDeclaration(node))
     addModuleLink(
       state,
@@ -283,11 +304,13 @@ const collectImports = (
   node: t.ImportDeclaration,
   state: JavaScriptSemanticAnalysisState,
 ): void => {
+  const resolutionMode = typescriptImportResolutionMode(node);
   if (node.specifiers.length === 0)
     addModuleLink(
       state,
       {
         kind: "import",
+        ...(resolutionMode === undefined ? {} : { resolutionMode }),
         specifier: node.source.value,
         importedName: null,
         localName: null,
@@ -301,6 +324,7 @@ const collectImports = (
       state,
       {
         kind: "import",
+        ...(resolutionMode === undefined ? {} : { resolutionMode }),
         specifier: node.source.value,
         importedName: t.isImportDefaultSpecifier(specifier)
           ? "default"
@@ -319,6 +343,7 @@ const collectNamedExports = (
   node: t.ExportNamedDeclaration,
   state: JavaScriptSemanticAnalysisState,
 ): void => {
+  const resolutionMode = typescriptImportResolutionMode(node);
   if (node.declaration !== null && node.declaration !== undefined)
     for (const localName of declarationNames(node.declaration))
       addModuleLink(
@@ -337,12 +362,13 @@ const collectNamedExports = (
   for (const specifier of node.specifiers)
     if (
       t.isExportSpecifier(specifier) ||
-      (t.isExportNamespaceSpecifier(specifier) && node.exportKind !== "type")
+      t.isExportNamespaceSpecifier(specifier)
     )
       addModuleLink(
         state,
         {
           kind: node.source == null ? "export" : "re-export",
+          ...(resolutionMode === undefined ? {} : { resolutionMode }),
           specifier: node.source?.value ?? null,
           importedName: t.isExportNamespaceSpecifier(specifier)
             ? "*"

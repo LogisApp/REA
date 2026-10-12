@@ -18,8 +18,10 @@ export interface JavaScriptSourceRange {
 }
 
 interface JavaScriptStaticReferenceState {
+  readonly resolution_mode?: "import" | "require";
   readonly kind:
     | "static-import"
+    | "type-import"
     | "dynamic-import"
     | "require"
     | "worker"

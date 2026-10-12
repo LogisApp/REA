@@ -24,6 +24,7 @@ import {
 } from "./JavaScriptArtifactGraphEvidence.js";
 import {
   moduleKindForJavaScriptReference,
+  moduleResolutionModeProperties,
   resolveArtifactPathByContext,
 } from "./JavaScriptArtifactPathResolution.js";
 
@@ -154,9 +155,14 @@ const addReference = (
     file: input.file,
     range: input.value.location,
     coverage: input.coverage,
-    relation: resolved?.file.kind === "native-addon" ? "loads" : "imports",
+    relation:
+      resolved?.file.kind === "native-addon" &&
+      input.value.kind !== "type-import"
+        ? "loads"
+        : "imports",
     properties: {
       kind: input.value.kind,
+      ...moduleResolutionModeProperties(input.value.resolution_mode),
       specifier: input.value.specifier,
       expression: input.value.expression,
       resolved_path: resolved?.path ?? null,
@@ -405,8 +411,15 @@ const resolveReference = (
           context.filesByPath,
           reference.kind === "require" ||
             reference.kind === "static-import" ||
+            reference.kind === "type-import" ||
             reference.kind === "dynamic-import"
-            ? moduleKindForJavaScriptReference(sourcePath, reference.kind)
+            ? moduleKindForJavaScriptReference(
+                sourcePath,
+                reference.kind === "type-import"
+                  ? "static-import"
+                  : reference.kind,
+                reference.resolution_mode,
+              )
             : undefined,
         );
   if (path === null) return null;

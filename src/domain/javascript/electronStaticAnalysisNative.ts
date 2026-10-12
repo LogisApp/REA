@@ -34,10 +34,13 @@ interface NativeBindingInput {
 export const inspectElectronNativeNode = (
   node: t.Node,
   context: JavaScriptFindingContext,
+  resolutionMode: "import" | "require" = "import",
 ): void => {
-  if (t.isImportDeclaration(node)) inspectImport(node, context);
-  else if (t.isExportNamedDeclaration(node)) inspectNamedExport(node, context);
-  else if (t.isExportAllDeclaration(node)) inspectExportAll(node, context);
+  if (t.isImportDeclaration(node)) inspectImport(node, context, resolutionMode);
+  else if (t.isExportNamedDeclaration(node))
+    inspectNamedExport(node, context, resolutionMode);
+  else if (t.isExportAllDeclaration(node))
+    inspectExportAll(node, context, resolutionMode);
   else if (t.isVariableDeclarator(node)) inspectRequireBinding(node, context);
   else if (t.isAssignmentExpression(node)) inspectReExport(node, context);
 };
@@ -45,8 +48,9 @@ export const inspectElectronNativeNode = (
 const inspectImport = (
   node: t.ImportDeclaration,
   context: JavaScriptFindingContext,
+  moduleKind: "import" | "require",
 ): void => {
-  if (!isNativeSpecifier(node.source.value, "import")) return;
+  if (!isNativeSpecifier(node.source.value, moduleKind)) return;
   const members = node.specifiers.flatMap((specifier) => {
     if (t.isImportDefaultSpecifier(specifier)) return ["default"];
     if (t.isImportNamespaceSpecifier(specifier)) return [];
@@ -57,7 +61,7 @@ const inspectImport = (
     node,
     specifier: node.source.value,
     kind: "import",
-    moduleKind: "import",
+    moduleKind,
     members,
     namespaceAccess: node.specifiers.some((value) =>
       t.isImportNamespaceSpecifier(value),
@@ -69,11 +73,12 @@ const inspectImport = (
 const inspectNamedExport = (
   node: t.ExportNamedDeclaration,
   context: JavaScriptFindingContext,
+  moduleKind: "import" | "require",
 ): void => {
   if (
     node.source === null ||
     node.source === undefined ||
-    !isNativeSpecifier(node.source.value, "import")
+    !isNativeSpecifier(node.source.value, moduleKind)
   )
     return;
   const members = node.specifiers.flatMap((specifier) => {
@@ -86,7 +91,7 @@ const inspectNamedExport = (
     node,
     specifier: node.source.value,
     kind: "re-export",
-    moduleKind: "import",
+    moduleKind,
     members,
     namespaceAccess: node.specifiers.some((value) =>
       t.isExportNamespaceSpecifier(value),
@@ -98,10 +103,11 @@ const inspectNamedExport = (
 const inspectExportAll = (
   node: t.ExportAllDeclaration,
   context: JavaScriptFindingContext,
+  moduleKind: "import" | "require",
 ): void => {
   if (
     node.source === undefined ||
-    !isNativeSpecifier(node.source.value, "import")
+    !isNativeSpecifier(node.source.value, moduleKind)
   )
     return;
   addBinding({
@@ -109,7 +115,7 @@ const inspectExportAll = (
     node,
     specifier: node.source.value,
     kind: "re-export",
-    moduleKind: "import",
+    moduleKind,
     members: [],
     namespaceAccess: true,
     dynamicMemberAccess: false,

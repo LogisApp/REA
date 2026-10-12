@@ -1,4 +1,5 @@
 import * as t from "@babel/types";
+import { typescriptImportResolutionMode } from "./typescriptImportResolutionMode.js";
 import { collectElectronWrappedCallPaths } from "./electronWrappedCallPaths.js";
 import {
   ELECTRON_IDENTITY_LIMITATION,
@@ -229,7 +230,8 @@ const inspectNode = (
   bindings: JavaScriptSemanticAnalysisState,
 ): void => {
   const { source, accumulator } = findings;
-  inspectElectronStaticNode(node, findings);
+  const resolutionMode = typescriptImportResolutionMode(node);
+  inspectElectronStaticNode(node, findings, resolutionMode);
   if (t.isCallExpression(node)) {
     inspectBundlerBootstrap(source, node, accumulator, bindings);
     inspectBundlerRegistration(source, node, accumulator);
@@ -241,19 +243,28 @@ const inspectNode = (
   if (
     (t.isImportDeclaration(node) || t.isExportAllDeclaration(node)) &&
     node.source !== undefined
-  )
+  ) {
     addReference(findings, {
       node,
       kind: "static-import",
       specifier: node.source.value,
+      ...(resolutionMode === undefined ? {} : { resolutionMode }),
     });
-  else if (t.isExportNamedDeclaration(node) && node.source != null)
+  } else if (t.isExportNamedDeclaration(node) && node.source != null) {
     addReference(findings, {
       node,
       kind: "static-import",
       specifier: node.source.value,
+      ...(resolutionMode === undefined ? {} : { resolutionMode }),
     });
-  else if (t.isImportExpression(node))
+  } else if (t.isTSImportType(node)) {
+    addReference(findings, {
+      node,
+      kind: "type-import",
+      specifier: stringValue(node.source),
+      ...(resolutionMode === undefined ? {} : { resolutionMode }),
+    });
+  } else if (t.isImportExpression(node))
     addReference(findings, {
       node,
       kind: "dynamic-import",

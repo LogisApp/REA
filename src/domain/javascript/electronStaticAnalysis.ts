@@ -9,8 +9,9 @@ import type { JavaScriptFindingContext } from "./javascriptStaticAnalysisState.j
 export const inspectElectronStaticNode = (
   node: t.Node,
   context: JavaScriptFindingContext,
+  resolutionMode?: "import" | "require",
 ): void => {
   inspectElectronBrowserNode(node, context);
   inspectElectronIpcNode(node, context);
-  inspectElectronNativeNode(node, context);
+  inspectElectronNativeNode(node, context, resolutionMode);
 };
