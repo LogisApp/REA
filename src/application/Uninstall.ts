@@ -13,6 +13,7 @@ import { join } from "node:path";
 
 import writeFileAtomic from "write-file-atomic";
 import { z } from "zod";
+import { ConfigurationError } from "../domain/configurationErrors.js";
 
 import { PRODUCT_IDENTITY } from "../identity.js";
 import {
@@ -279,12 +280,13 @@ const readClientConfiguration = async (
     const parsed = parseClientConfiguration(original, client.format);
     return { kind: "configuration", transactionPath, original, parsed };
   } catch (cause: unknown) {
-    void cause;
     return itemRead(
       item(
         client.name,
         "failed",
-        `Configuration is not valid ${client.format === "toml" || client.format === "grok" ? "TOML" : client.format === "opencode" ? "JSONC" : "JSON"} and was not changed. Repair it, then rerun uninstall.`,
+        cause instanceof ConfigurationError
+          ? `Configuration ${client.configPath} is malformed: ${cause.message} It was not changed. Repair it, then rerun uninstall.`
+          : `Configuration is not valid ${client.format === "toml" || client.format === "grok" ? "TOML" : client.format === "opencode" ? "JSONC" : client.format === "hermes" || client.format === "dsh" ? "YAML" : "JSON"} and was not changed. Repair it, then rerun uninstall.`,
       ),
     );
   }

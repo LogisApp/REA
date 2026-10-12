@@ -26,6 +26,7 @@ import { z } from "zod";
 import { PRODUCT_IDENTITY } from "../identity.js";
 import type { SetupClient } from "./SupportedClients.js";
 import { compareUnicodeCodePoints } from "../domain/unicodeCodePointOrder.js";
+import { ConfigurationError } from "../domain/configurationErrors.js";
 
 export type ClientConfigurationFormat = NonNullable<SetupClient["format"]>;
 export type ClientServersKey = "mcp_servers" | "mcpServers" | "mcp" | "servers";
@@ -54,6 +55,25 @@ export interface ClientConfigurationDocument {
 }
 
 const objectSchema = z.record(z.string(), z.unknown());
+
+/** Validate structure once at the parser boundary, retaining its field location. */
+const configurationObject = (
+  value: unknown,
+  path: readonly string[],
+): Record<string, unknown> => {
+  const parsed = objectSchema.safeParse(value);
+  if (parsed.success) return parsed.data;
+  const setting = path.length === 0 ? "configuration root" : path.join(".");
+  throw new ConfigurationError(
+    path.length === 0
+      ? "The configuration root must be an object."
+      : `Configuration field ${JSON.stringify(setting)} must be an object.`,
+    {
+      cause: parsed.error,
+      settings: [{ setting, constraint: "must be an object" }],
+    },
+  );
+};
 
 /** Compare parsed configuration values without depending on parser prototypes. */
 export const clientConfigurationValuesEqual = (
@@ -104,18 +124,17 @@ const isEmptyClientConfigurationText = (text: string): boolean =>
 const parseDocument = (
   text: string,
   format: ClientConfigurationFormat,
-): Record<string, unknown> => {
-  if (format === "toml" || format === "grok")
-    return objectSchema.parse(parseToml(text));
+): unknown => {
+  if (format === "toml" || format === "grok") return parseToml(text);
   // Pi loads `mcp.json` with a strict `JSON.parse` and no BOM tolerance, so
   // comments, trailing commas, a BOM, or an empty existing file must be
   // rejected instead of registering into a document Pi cannot load.
-  if (format === "pi") return objectSchema.parse(JSON.parse(text));
+  if (format === "pi") return JSON.parse(text);
   // An empty file, which some clients create before any server is added,
   // holds no settings to preserve.
   if (isEmptyClientConfigurationText(text)) return {};
   // Hermes stores MCP servers in `mcp_servers` inside a YAML document.
-  if (format === "hermes") return objectSchema.parse(parseYaml(text));
+  if (format === "hermes") return parseYaml(text);
   const errors: ParseError[] = [];
   // Accept a UTF-8 BOM without shifting diagnostics or editing the original text.
   const jsonText = text.startsWith("\uFEFF") ? ` ${text.slice(1)}` : text;
@@ -125,7 +144,7 @@ const parseDocument = (
     throw new SyntaxError(
       `Invalid JSON/JSONC at offset ${firstError.offset}: ${printParseErrorCode(firstError.error)}`,
     );
-  return objectSchema.parse(document);
+  return document;
 };
 
 /** Members of OpenCode V2's `mcp` object that are not server names. */
@@ -140,10 +159,11 @@ export const parseClientConfiguration = (
     throw new TypeError("client does not have a supported MCP config format");
   // DeepSeek Harness stores a Cordis patch list, not a server table.
   if (format === "dsh") return parseDshCordisDocument(text);
-  const document = parseDocument(text, format);
+  const document = configurationObject(parseDocument(text, format), []);
   const serversKey = clientConfigurationServersKey(format);
   const value = document[serversKey];
-  const servers = value === undefined ? {} : objectSchema.parse(value);
+  const servers =
+    value === undefined ? {} : configurationObject(value, [serversKey]);
   const native = servers.servers;
   // A V1 server named `servers` has a string `type` discriminator; the V2
   // table may instead hold a server object named `type`.
@@ -164,7 +184,7 @@ export const parseClientConfiguration = (
     };
   return {
     document,
-    servers: objectSchema.parse(native),
+    servers: configurationObject(native, [serversKey, "servers"]),
     serversPath: [serversKey, "servers"],
     dialect: "opencode_v2",
     legacyServers: Object.fromEntries(
