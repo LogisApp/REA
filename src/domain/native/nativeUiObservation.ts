@@ -98,7 +98,7 @@ const nativeUiScreenshotSchema = z
     if (
       bytes.byteLength < 24 ||
       !bytes.subarray(0, 8).equals(PNG_SIGNATURE) ||
-      bytes.subarray(12, 16).toString("ascii") !== "IHDR"
+      !bytes.subarray(12, 16).equals(Buffer.from("IHDR"))
     ) {
       context.addIssue({
         code: "custom",
