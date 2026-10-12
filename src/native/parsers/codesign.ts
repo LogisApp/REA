@@ -16,14 +16,11 @@ export const parseCodeSignature = (
   unsigned: boolean,
   executablePaths: readonly string[] = [],
 ): Omit<InspectSignature, "provenance"> => {
-  const { identifier, fields } = splitEchoedValues(
-    output.replaceAll("\r\n", "\n"),
-    executablePaths,
-  );
+  const { identifier, fields } = splitEchoedValues(output, executablePaths);
   const values = new Map<string, string>();
   const authorities: string[] = [];
   const cdhashes: string[] = [];
-  for (const line of fields.split("\n")) {
+  for (const line of fields.split(/\r?\n/u)) {
     if (line.startsWith("CodeDirectory ")) {
       values.set("CodeDirectory", line.slice("CodeDirectory ".length));
       continue;
@@ -65,12 +62,20 @@ const splitEchoedValues = (
   text: string,
   executablePaths: readonly string[],
 ): { readonly identifier: string | undefined; readonly fields: string } => {
-  const executable = executablePaths
-    .map((path) => `Executable=${path}\n`)
-    .find((line) => text.startsWith(line));
   let rest = text;
-  if (executable !== undefined) rest = text.slice(executable.length);
-  else if (text.startsWith("Executable=")) {
+  // Frame the exact source path before interpreting record separators. A CRLF
+  // inside that path or the signing identifier is payload, not a line ending.
+  let newline = "\n";
+  for (const path of executablePaths) {
+    const prefix = `Executable=${path}`;
+    if (!text.startsWith(prefix)) continue;
+    const separator = /^\r?\n/u.exec(text.slice(prefix.length))?.[0];
+    if (separator === undefined) continue;
+    newline = separator;
+    rest = text.slice(prefix.length + separator.length);
+    break;
+  }
+  if (rest === text && text.startsWith("Executable=")) {
     const identifierLine = text.indexOf("\nIdentifier=");
     rest = identifierLine < 0 ? text : text.slice(identifierLine + 1);
   }
@@ -78,8 +83,8 @@ const splitEchoedValues = (
     return { identifier: undefined, fields: rest };
   // Later fields come from the signature itself, so the last `Format=` line
   // is the one codesign printed after the identifier.
-  const format = rest.lastIndexOf("\nFormat=");
-  const lineEnd = rest.indexOf("\n");
+  const format = rest.lastIndexOf(`${newline}Format=`);
+  const lineEnd = rest.indexOf(newline);
   const end = format >= 0 ? format : lineEnd >= 0 ? lineEnd : rest.length;
   return {
     identifier: rest.slice("Identifier=".length, end),
