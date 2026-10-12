@@ -4,6 +4,7 @@ import {
   clientServerPath,
   legacyClientServerPath,
   withClientServers,
+  ClientConfigurationStructureError,
   type ClientConfigurationDocument,
 } from "./ClientConfigurationDocument.js";
 import { copyFile, lstat, realpath, rm } from "node:fs/promises";
@@ -279,14 +280,11 @@ const readClientConfiguration = async (
     const parsed = parseClientConfiguration(original, client.format);
     return { kind: "configuration", transactionPath, original, parsed };
   } catch (cause: unknown) {
-    void cause;
-    return itemRead(
-      item(
-        client.name,
-        "failed",
-        `Configuration is not valid ${client.format === "toml" || client.format === "grok" ? "TOML" : client.format === "opencode" ? "JSONC" : "JSON"} and was not changed. Repair it, then rerun uninstall.`,
-      ),
-    );
+    const detail =
+      cause instanceof ClientConfigurationStructureError
+        ? `Configuration ${cause.message} and was not changed. Repair it, then rerun uninstall.`
+        : `Configuration is not valid ${client.format === "toml" || client.format === "grok" ? "TOML" : client.format === "opencode" ? "JSONC" : "JSON"} and was not changed. Repair it, then rerun uninstall.`;
+    return itemRead(item(client.name, "failed", detail));
   }
 };
 

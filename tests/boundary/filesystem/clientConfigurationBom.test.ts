@@ -99,6 +99,20 @@ describe.each([
   );
 });
 
+it.each([
+  ['{"mcpServers": null, "keep": 1}', '"mcpServers" must be an object'],
+  ["[]", "the configuration root must be an object"],
+  ['{"mcpServers": "x"}', '"mcpServers" must be an object'],
+])(
+  "names the structural problem for valid JSON of the wrong shape: %j",
+  (original, message) => {
+    const client = { name: "cursor", format: "json" } as const;
+    expect(() => parseClientConfiguration(original, client.format)).toThrow(
+      message,
+    );
+  },
+);
+
 it.each(['\uFEFF{"servers": {"rea": @}}', '\uFEFF{"setting":\uFEFFtrue}'])(
   "rejects malformed BOM placement without mutation: %j",
   async (original) => {
