@@ -239,7 +239,7 @@ const selectModule = (
 export const projectJavaScriptApplicationView = (
   parent: AnalysisViewParent,
   analysis: JavaScriptApplicationAnalysisResult,
-  view: AnalysisViewRequest,
+  view: Exclude<AnalysisViewRequest, { kind: "api-surface" }>,
 ): Result<UnsignedAnalysisView, AnalysisError> => {
   const shared = parentFields(parent, analysis);
   const modules = moduleEntries(analysis.graph.nodes);
@@ -255,6 +255,11 @@ export const projectJavaScriptApplicationView = (
         input_path: analysis.input_path,
         format: analysis.format,
         root_artifact_sha256: analysis.root_artifact_sha256,
+        ...(analysis.source_selection === undefined
+          ? {}
+          : {
+              source_selection: analysis.source_selection,
+            }),
         statistics: jsonObjectSchema.parse(analysis.statistics),
         electron: jsonObjectSchema.parse(analysis.summary),
         coverage: jsonObjectSchema.parse({

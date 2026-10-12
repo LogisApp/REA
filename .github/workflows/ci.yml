@@ -115,15 +115,11 @@ jobs:
       - run: npm ci
       - uses: actions/download-artifact@v4
         with:
-          name: rea-dist
-          path: dist
-      - name: Generate test artifacts from the downloaded runtime
-        run: |
-          node scripts/generate-mcp-tool-catalog.mjs
-          node scripts/generate-skill-metadata.mjs
-          node scripts/generate-product-catalog.mjs
-          node scripts/generate-completion-ledger.mjs
+          name: rea-test-runtime
+          path: .
       - run: npm run test:ci:shard:run -- --shard=${{ matrix.shard }}
+        env:
+          REA_CI_TEST_HISTORY: .cache/ci-test-history/test-results.json
       - uses: actions/upload-artifact@v4
         if: ${{ !cancelled() }}
         with:
@@ -139,6 +135,9 @@ jobs:
     needs: changes
     if: needs.changes.outputs.code == 'true'
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      actions: read
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
@@ -146,11 +145,55 @@ jobs:
           node-version-file: .nvmrc
           cache: npm
       - run: npm ci
-      - run: npm run build:cached
+      - name: Reuse portable build outputs across runs
+        uses: ./.github/actions/portable-build-cache
+        with:
+          save: "true"
+      - run: npm run test:prepare
+      - name: Find successful default-branch timing history
+        id: history
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ github.token }}
+          CI_REPOSITORY: ${{ github.repository }}
+          CI_DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+        run: |
+          run_id="$(gh api --method GET \
+            "repos/${CI_REPOSITORY}/actions/workflows/ci.yml/runs" \
+            -f branch="${CI_DEFAULT_BRANCH}" -f event=push -f status=success -f per_page=1 \
+            --jq '.workflow_runs[0].id // empty')"
+          echo "run-id=${run_id}" >> "${GITHUB_OUTPUT}"
+      - name: Download previous timing report
+        if: steps.history.outputs.run-id != ''
+        continue-on-error: true
+        uses: actions/download-artifact@v4
+        with:
+          name: test-results
+          run-id: ${{ steps.history.outputs.run-id }}
+          github-token: ${{ github.token }}
+          path: .cache/ci-test-history
       - uses: actions/upload-artifact@v4
         with:
-          name: rea-dist
-          path: dist
+          name: rea-test-runtime
+          path: |
+            dist/
+            skills/
+            .cache/mcp-tool-catalog.json
+            .cache/ci-test-history/test-results.json
+            docs/public/product-catalog.json
+            docs/verification/managed-conformance-*.json
+          include-hidden-files: true
+          if-no-files-found: error
+          retention-days: 7
+
+      # test:prepare caches only portable JS, skill, and catalog outputs.
+      # Native package jobs still run their build and prepack checks; Turbo
+      # restores matching outputs or rebuilds when their inputs differ.
+      - uses: actions/upload-artifact@v4
+        with:
+          name: rea-build-cache
+          path: .turbo/cache/
+          include-hidden-files: true
           if-no-files-found: error
           retention-days: 7
 
@@ -262,6 +305,12 @@ jobs:
           sudo apt-get install --no-install-recommends -y g++-mingw-w64-x86-64
       - run: npm run build:windows-native
       - run: npm run verify:windows-native:artifact
+      - run: node scripts/build-windows-native.mjs --inspection-fixture
+      - uses: actions/upload-artifact@v4
+        with:
+          name: windows-native-inspection-fixture
+          path: .cache/windows-native-inspection-fixture/
+          if-no-files-found: error
       - uses: actions/upload-artifact@v4
         with:
           name: windows-native-controls
@@ -270,11 +319,14 @@ jobs:
 
   package-e2e:
     name: Native package baseline (${{ matrix.platform }} ${{ matrix.architecture }})
-    needs: [changes, windows-native-build]
+    needs: [changes, build, windows-native-build]
     if: needs.changes.outputs.runtime == 'true'
     strategy:
       fail-fast: false
-      max-parallel: 2
+      # The four platform jobs use independent hosted runners; keep each
+      # runner's existing heap and threadpool limits while avoiding a queued
+      # second platform wave.
+      max-parallel: 4
       matrix: ${{ fromJSON(needs.changes.outputs.matrix) }}
     runs-on: ${{ matrix.os }}
     timeout-minutes: 20
@@ -299,10 +351,21 @@ jobs:
       - run: npm ci
       - uses: actions/download-artifact@v4
         with:
+          name: rea-build-cache
+          path: .turbo/cache/
+      - uses: actions/download-artifact@v4
+        with:
           name: windows-native-controls
           path: native/windows/build/
       - run: npm run verify:windows-native:artifact
+      - name: Resolve npm cache before verifier HOME isolation
+        id: npm-cache
+        run: |
+          cache_path="$(npm config get cache)"
+          echo "path=${cache_path}" >> "${GITHUB_OUTPUT}"
       - run: npm run verify:package
+        env:
+          npm_config_cache: ${{ steps.npm-cache.outputs.path }}
       - name: Verify real Node Inspector discovery and observation
         timeout-minutes: 10
         run: npm run verify:inspector
@@ -320,25 +383,36 @@ jobs:
           node-version-file: .nvmrc
           cache: npm
       - run: npm ci
-      - run: npm run verify:keyed-archive
-      - run: npm run verify:asset-catalog
-      - run: npm run verify:macos-bundle
-      - name: Legacy simulator platform verification
-        run: npm run verify:legacy-simulator
-      - name: Native installer and compiled NIB hierarchy regressions
-        run: npm run test:focused -- tests/boundary/filesystem/installScript.test.ts tests/boundary/filesystem/nibNativeHierarchy.test.ts tests/boundary/filesystem/interfaceBuilderBundle.test.ts
-      - name: Real binary metadata and Interface Builder integration
-        run: npm run verify:apple-dispatch && npm run verify:interface-builder
-      - name: Native plist CLI selection regressions
-        run: npm run test:focused -- tests/boundary/cli/nativePlistCli.test.ts tests/boundary/cli/nativePlistPrototypeKeyCli.test.ts tests/boundary/cli/nativePlistSelectionFailureCli.test.ts
-      - name: Native Swift demangling CLI and MCP regressions
-        run: npm run test:focused -- tests/boundary/cli/nativeDemangleCli.test.ts tests/boundary/mcp/nativeDemangleMcp.test.ts
-      - name: Native signature target binding and CLI/MCP recovery regressions
-        run: npm run test:focused -- tests/boundary/providers/native/nativeSignatureTargetBinding.test.ts tests/boundary/cli/nativeSignatureCli.test.ts tests/boundary/mcp/nativeSignatureTargetBindingMcp.test.ts
-      - name: Process filesystem snapshot descriptor regressions
-        run: npm run test:focused -- src/process/capture/FilesystemSnapshot.test.ts
-      - name: Native Darwin ownership and process cleanup regressions
-        run: npm run test:focused -- tests/boundary/process/darwinProcessRunTokenReader.test.ts tests/boundary/process/directAnalysisSignals.test.ts tests/boundary/process/processCaptureLifecycle.test.ts tests/boundary/process/processCli.test.ts tests/boundary/mcp/sessionMcp.test.ts
+      - name: Verify Apple artifact formats and metadata
+        env:
+          REA_ARTIFACT_NODE_COMPILE_CACHE: ${{ runner.temp }}/rea-artifact-node-cache
+        run: |
+          npm run verify:keyed-archive
+          npm run verify:asset-catalog
+          npm run verify:macos-bundle
+          npm run verify:legacy-simulator
+          npm run verify:apple-dispatch
+          npm run verify:interface-builder
+      - name: Run native Apple and process boundary regressions
+        run: >-
+          npm run test:focused --
+          tests/boundary/filesystem/installScript.test.ts
+          tests/boundary/filesystem/nibNativeHierarchy.test.ts
+          tests/boundary/filesystem/interfaceBuilderBundle.test.ts
+          tests/boundary/cli/nativePlistCli.test.ts
+          tests/boundary/cli/nativePlistPrototypeKeyCli.test.ts
+          tests/boundary/cli/nativePlistSelectionFailureCli.test.ts
+          tests/boundary/cli/nativeDemangleCli.test.ts
+          tests/boundary/mcp/nativeDemangleMcp.test.ts
+          tests/boundary/providers/native/nativeSignatureTargetBinding.test.ts
+          tests/boundary/cli/nativeSignatureCli.test.ts
+          tests/boundary/mcp/nativeSignatureTargetBindingMcp.test.ts
+          src/process/capture/FilesystemSnapshot.test.ts
+          tests/boundary/process/darwinProcessRunTokenReader.test.ts
+          tests/boundary/process/directAnalysisSignals.test.ts
+          tests/boundary/process/processCaptureLifecycle.test.ts
+          tests/boundary/process/processCli.test.ts
+          tests/boundary/mcp/sessionMcp.test.ts
 
   reconstruction-readiness:
     name: Reconstruction readiness
@@ -419,7 +493,7 @@ jobs:
           tests/acceptance/webSourceLocationCli.test.ts
           tests/boundary/cli/referenceSourceImportStatus.test.ts
           tests/boundary/filesystem/asarInventoryFreshness.test.ts
-          tests/composition/javascript-applications/javascriptArtifactReconstruction.test.ts
+          tests/boundary/filesystem/javascript-applications/javascriptArtifactReconstruction.test.ts
           tests/conformance/providers/ghidra/windowsCapabilities.test.ts
           src/ghidra/GhidraInstallation.test.ts
           tests/boundary/providers/ghidra/ghidraTransport.test.ts
@@ -437,6 +511,12 @@ jobs:
           tests/process-global/updateMaintenance.test.ts
           tests/conformance/providers/ghidra/realGhidraWindowsWorkflow.test.ts
       - run: npm run verify:windows-native
+      - uses: actions/download-artifact@v4
+        with:
+          name: windows-native-inspection-fixture
+          path: .cache/windows-native-inspection-fixture/
+      - name: Verify native inspection failure ownership and recovery
+        run: node scripts/verify-windows-native-inspection.mjs
       - name: Verify real Node Inspector discovery and observation
         timeout-minutes: 10
         env:

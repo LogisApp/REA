@@ -37,7 +37,43 @@ module page. See
 [JavaScript application workflows](javascript-application-workflows.md) for
 views, feature traces and comparisons that take the same saved Evidence.
 
+## Managed assemblies (.NET)
+
+For a .NET PE/CLI assembly, inspect its identity and deployment form before
+inspecting members. These commands read metadata and Common Intermediate
+Language (CIL) without loading or executing the assembly and require no native
+analysis engine:
+
+```bash
+rea inspect-managed-artifact /absolute/path/Assembly.dll --json
+rea inspect-managed-members /absolute/path/Assembly.dll --json
+rea inspect-managed-members /absolute/path/Assembly.dll --type Example.Parser --json
+```
+
+Replace `Example.Parser` with an exact `full_name` from the member inspection,
+or a declaring type name you already know. Omit `--type` to inspect all members,
+or repeat it to select several types.
+Selection limits decoding to the selected types; member references remain an
+assembly-wide inventory, so the output can still be large.
+
+Choose the workflow from the artifact's contents rather than its `.exe` or
+`.dll` extension. The managed parser requires PE/CLI metadata; it does not
+unpack .NET single-file hosts or decode IL2CPP metadata. NativeAOT method bodies
+require native analysis. See the [managed-code guide](managed-code-analysis.md)
+for supported deployment forms, selection semantics, and coverage limits.
+
 ## Native analysis
+
+Inspect embedded Go build metadata without installing Go or configuring a
+disassembler:
+
+```bash
+rea inspect-go-binary /absolute/path/to/program --json
+```
+
+The shared CLI/MCP workflow reports compiler version, modules, replacements,
+build settings, original bytes and SHA-256. See [Go binaries](go-binaries.md)
+for supported containers and absent or malformed metadata.
 
 Configure [Hopper or Ghidra](installation.md#hopper), or the
 [IDA adapter](ida-provider.md), before analyzing a native target. Substitute
@@ -59,7 +95,8 @@ alone, use `rea instructions`. A macOS `.app` bundle can be supplied directly.
 Run `rea --help` or a command's `--help` for arguments and output options.
 The [generated catalog](product-catalog.json) lists all CLI commands and MCP
 tools. Provider-specific target support is described in the
-[native guide](native-investigation.md), [DOS guide](ghidra-dos.md), and
+[native guide](native-investigation.md), [DOS guide](ghidra-dos.md),
+[raw binary guide](raw-binary.md), and
 [Windows Ghidra guide](windows-ghidra-p0.md).
 
 ## Choose a provider
@@ -112,6 +149,10 @@ A snapshot retains successful analysis results for later queries. REA reuses
 an exact result when the target bytes, operation, parameters, provider and
 settings match. Mutations and cursor-dependent calls are excluded from the
 cache. Snapshot files are local and use owner-only permissions.
+
+Dispatching a metadata write invalidates the active session's snapshot cache,
+even if its reply fails: the provider may already have applied the write.
+Close and reopen the target before importing or saving another snapshot.
 
 Snapshots retain eligible target-scoped question histories in full, including
 mutation Evidence recorded while another target was active. Observations and

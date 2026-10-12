@@ -14,7 +14,10 @@ import {
   createAnalysisProfile,
   type AnalysisProfileCommitment,
 } from "../domain/analysisProfile.js";
-import type { BinaryTarget } from "../domain/binaryTargetTypes.js";
+import {
+  isMachOFormat,
+  type BinaryTarget,
+} from "../domain/binaryTargetTypes.js";
 import {
   jsonObjectSchema,
   jsonValueSchema,
@@ -37,13 +40,15 @@ import {
   admitGhidraLanguageOverride,
   readGhidraLanguageCatalog,
 } from "./GhidraLanguageCatalog.js";
-import { ghidraMipsUnsupportedReason } from "./GhidraMipsProfile.js";
+import {
+  ghidraProcessorUnsupportedReason,
+  isGhidraPspTarget,
+} from "./GhidraPspProfile.js";
 import { resolveGhidraExtensions } from "./extensions/GhidraExtensions.js";
 import {
   CAPABILITIES,
   windowsP0Capabilities,
   GHIDRA_PROVIDER_IDENTITY,
-  GHIDRA_OPERATIONS,
 } from "./GhidraProviderCapabilities.js";
 import {
   createGhidraProviderClient,
@@ -149,7 +154,12 @@ export class GhidraProvider implements AnalysisProviderCandidate {
       };
     if (hostPlatform === "win32")
       return inspectWindowsP0TargetSupport(target, diagnostics);
-    const mipsReason = ghidraMipsUnsupportedReason(target);
+    const mipsReason =
+      isGhidraPspTarget(target) &&
+      (hostPlatform !== "linux" ||
+        (this.installationHost?.architecture ?? process.arch) !== "x64")
+        ? "The initial PSP Allegrex profile is verified on Linux x64 only."
+        : ghidraProcessorUnsupportedReason(target);
     if (mipsReason !== null)
       return {
         status: "unsupported",
@@ -157,7 +167,10 @@ export class GhidraProvider implements AnalysisProviderCandidate {
         reason: mipsReason,
         diagnostics,
       };
-    if (target.format === "mach-o" && target.availableArchitectures.length > 1)
+    if (
+      isMachOFormat(target.format) &&
+      target.availableArchitectures.length > 1
+    )
       return {
         status: "unsupported",
         code: "architecture_unsupported",
@@ -192,6 +205,7 @@ export class GhidraProvider implements AnalysisProviderCandidate {
       installation,
       options?.signal,
       this.config.ghidraLanguageOverride,
+      this.config.ghidraDisabledAnalyzers,
     );
     if (!resolved.ok || resolved.value.profile === null) return resolved;
     const override = this.config.ghidraLanguageOverride;

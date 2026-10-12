@@ -10,9 +10,14 @@ import { CdpBrowserProvider } from "../../../src/browser/CdpBrowserProvider.js";
 import { webPageInspectionSchema } from "../../../src/domain/browserObservationSchemas.js";
 import { createWebScreenshotArtifact } from "../../../src/domain/webScreenshot.js";
 import { JAVASCRIPT_RUNTIME_RECONCILIATION_EXAMPLE } from "../../../src/contracts/javascript/javascriptRuntimeReconciliationExample.js";
-import { TOOL_CONTRACTS } from "../../../src/contracts/toolContracts.js";
+import {
+  TOOL_CONTRACTS,
+  toolContract,
+} from "../../../src/contracts/toolContracts.js";
+import { expandToolAvailability } from "../../../src/contracts/toolOutputSchemaPrimitives.js";
 import { createServer } from "../../../src/server/createServer.js";
 import { observed } from "../../fixtures/analysisExecution.js";
+import { runCliJson } from "../../fixtures/cliJsonProcess.js";
 import {
   startFakeCdpBrowser,
   type FakeCdpBrowser,
@@ -58,16 +63,18 @@ it(
       name: "binary_session",
       arguments: {},
     });
-    expect(status.structuredContent).toMatchObject({
-      result: {
-        tool_availability: expect.arrayContaining([
-          expect.objectContaining({
-            name: "inspect_web_page",
-            reason: expect.any(String),
-          }),
-        ]),
-      },
-    });
+    const sessionStatus = toolContract("binary_session").outputSchema.parse(
+      status.structuredContent,
+    );
+    const availability = expandToolAvailability(
+      sessionStatus.result.tool_availability,
+    );
+    expect(availability).toContainEqual(
+      expect.objectContaining({
+        name: "inspect_web_page",
+        reason: expect.any(String),
+      }),
+    );
     const listed = await connected.client.callTool({
       name: "list_browser_targets",
       arguments: {
@@ -335,6 +342,87 @@ const assertScreenshotPngFailures = async (client: Client): Promise<void> => {
     error: { code: "unsupported_target", category: "unsupported_target" },
   });
 };
+
+it("delivers the source-map response URL through authenticated MCP Evidence", async () => {
+  const terminalPath = "/maps/v1/app.js.map?revision=2&token=source-value";
+  const browser = await startFakeCdpBrowser({
+    sourceMapRedirect: terminalPath,
+    sourceMapBody: JSON.stringify({
+      version: 3,
+      names: [],
+      sources: ["../src/original.js"],
+      sourcesContent: ["export const value = 1;"],
+      mappings: "AAAA",
+    }),
+  });
+  browsers.push(browser);
+  const connected = await connectBrowser();
+  const result = await connected.client.callTool({
+    name: "analyze_web_bundle",
+    arguments: {
+      cdp_endpoint: browser.endpoint,
+      target_id: "allowed-page",
+      allowed_origins: [browser.allowedOrigin],
+      observation_ms: 0,
+      fetch_source_maps: true,
+    },
+  });
+  expect(result.isError).not.toBe(true);
+  const evidence = parseEvidence(result.structuredContent);
+  const expectedResult = {
+    observations: {
+      source_maps: {
+        status: "included",
+        items: [
+          {
+            declared_url: `${browser.allowedOrigin}/app.js.map?token=map-secret`,
+            effective_url: `${browser.allowedOrigin}${terminalPath}`,
+            original_sources: [
+              { source: `${browser.allowedOrigin}/maps/src/original.js` },
+            ],
+          },
+        ],
+      },
+    },
+  };
+  expect(evidence.normalized_result).toMatchObject(expectedResult);
+  expect(result.content).toHaveLength(1);
+  expect(result.content[0]).toMatchObject({
+    type: "text",
+    text: JSON.stringify(evidence),
+  });
+  const cliEvidence = parseEvidence(
+    await runCliJson([
+      "analyze-web-bundle",
+      browser.endpoint,
+      "allowed-page",
+      "--allowed-origins",
+      browser.allowedOrigin,
+      "--observation-ms",
+      "0",
+      "--fetch-source-maps",
+      "--json",
+    ]),
+  );
+  expect(cliEvidence.normalized_result).toMatchObject(expectedResult);
+  const mapRequests = browser.httpRequests.filter(({ url }) =>
+    url.includes(".map"),
+  );
+  expect(mapRequests.map(({ url }) => url)).toEqual([
+    "/app.js.map?token=map-secret",
+    terminalPath,
+    "/app.js.map?token=map-secret",
+    terminalPath,
+  ]);
+  expect(
+    mapRequests.every(
+      ({ authorization, cookie, referer }) =>
+        authorization === undefined &&
+        cookie === undefined &&
+        referer === undefined,
+    ),
+  ).toBe(true);
+});
 
 it("does not attach to a target outside the request's allowed origin scope", async () => {
   const browser = await startFakeCdpBrowser();

@@ -102,7 +102,7 @@ const unavailableResult = (
   bytes: Buffer,
   layout: ManagedPeLayout,
 ): ManagedArtifactInspection => {
-  const malformed = layout.cliDirectoryPresent;
+  const malformed = layout.cliDirectoryState !== "absent";
   const issues = layout.cliIssue === null ? [] : [layout.cliIssue];
   const limitations = malformed
     ? [
@@ -204,10 +204,7 @@ const runtimeFamilyFor = (
       file_offset: metadata.table(12)?.offset ?? null,
     });
   } else if (
-    frameworks.some(
-      (value) =>
-        value.startsWith(".NETCoreApp,") || value.startsWith(".NETStandard,"),
-    ) ||
+    frameworks.some((value) => value.startsWith(".NETCoreApp,")) ||
     cli.readyToRunSignature
   ) {
     runtimeFamily = "modern-dotnet";
@@ -225,6 +222,13 @@ const runtimeFamilyFor = (
             "cli.managed-native-header",
           )
         : (metadata.table(12)?.offset ?? null),
+    });
+  } else if (frameworks.some((value) => value.startsWith(".NETStandard,"))) {
+    evidence.push({
+      code: "target-framework-observed",
+      detail:
+        "An assembly-level TargetFrameworkAttribute names .NET Standard, an API specification that does not identify a runtime family.",
+      file_offset: metadata.table(12)?.offset ?? null,
     });
   }
   return { runtime_family: runtimeFamily, evidence };

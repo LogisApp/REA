@@ -6,6 +6,7 @@ import type { EvidenceBundle } from "../../domain/evidenceBundle.js";
 import type { JsonValue } from "../../domain/jsonValue.js";
 import { evidenceBundleForTarget } from "../../domain/evidenceBundle.js";
 import {
+  EvidenceFileError,
   EvidenceIntegrityError,
   AnalysisSnapshotMismatchError,
 } from "../../domain/evidenceErrors.js";
@@ -24,6 +25,9 @@ import type {
 } from "../AnalysisProvider.js";
 import { AnalysisSnapshotCache } from "./AnalysisSnapshotCache.js";
 import { InvestigationRecords } from "../investigation/InvestigationRecords.js";
+import { ArtifactResourceScope } from "../../artifacts/ArtifactResourceScope.js";
+import { ArtifactReaderFailure } from "../../artifacts/ArtifactReader.js";
+import { writeAnalysisSnapshot as writeSnapshotFile } from "./AnalysisSnapshotFiles.js";
 
 const SNAPSHOT_MUTATION_RECOVERY =
   "Export session observations through export_evidence_bundle if needed. Close the active target without saving a snapshot, then reopen it before importing or saving a snapshot.";
@@ -45,6 +49,7 @@ export interface WorkflowSnapshotRecordInput {
 /** Own binary snapshots and coordinate the composed investigation records. */
 export abstract class BinarySessionRecords {
   readonly #records: InvestigationRecords;
+  readonly #writeResources = new ArtifactResourceScope();
   readonly #snapshot = new AnalysisSnapshotCache();
   #snapshotInvalidated = false;
   readonly #snapshotListeners = new Set<() => void | Promise<void>>();
@@ -89,6 +94,39 @@ export abstract class BinarySessionRecords {
     return this.#records.evidenceBundleForSerialization();
   }
 
+  /** Persist one provider-neutral snapshot under this session's resource owner. */
+  writeAnalysisSnapshot(
+    snapshot: AnalysisSnapshot,
+    path: string,
+    overwrite: boolean,
+  ): Promise<
+    Result<{ readonly path: string; readonly bytes: number }, AnalysisError>
+  > {
+    return writeSnapshotFile(snapshot, path, overwrite, this.#writeResources);
+  }
+
+  /** Retry and release staged snapshot files at the owning session shutdown. */
+  async closeWriteResources(): Promise<Result<null, AnalysisError>> {
+    try {
+      await this.#writeResources.retryCleanup();
+      return ok(null);
+    } catch (cause: unknown) {
+      const observation = ArtifactReaderFailure.cleanupObservation(
+        cause,
+        "analysis snapshot staging",
+      );
+      return err(
+        new EvidenceFileError("write", "io", {
+          cause,
+          cleanup: {
+            reason: observation.reason,
+            resources: observation.resources,
+          },
+        }),
+      );
+    }
+  }
+
   importEvidenceBundle(
     bundle: unknown,
   ): Result<number, EvidenceIntegrityError> {
@@ -106,9 +144,9 @@ export abstract class BinarySessionRecords {
     if (this.#snapshotInvalidated)
       return err(
         new EvidenceIntegrityError(
-          "Analysis snapshots are unavailable after analysis metadata mutations",
+          "Analysis snapshots are unavailable because analysis metadata may have changed",
           {
-            userMessage: `Analysis snapshots are unavailable after analysis metadata mutations. ${SNAPSHOT_MUTATION_RECOVERY}`,
+            userMessage: `Analysis snapshots are unavailable because analysis metadata may have changed. ${SNAPSHOT_MUTATION_RECOVERY}`,
           },
         ),
       );
@@ -139,9 +177,9 @@ export abstract class BinarySessionRecords {
     if (active !== undefined && this.#snapshotInvalidated)
       return err(
         new EvidenceIntegrityError(
-          "Analysis snapshots cannot be imported after analysis metadata mutations",
+          "Analysis snapshots cannot be imported because analysis metadata may have changed",
           {
-            userMessage: `Analysis snapshots cannot be imported after analysis metadata mutations. ${SNAPSHOT_MUTATION_RECOVERY}`,
+            userMessage: `Analysis snapshots cannot be imported because analysis metadata may have changed. ${SNAPSHOT_MUTATION_RECOVERY}`,
           },
         ),
       );

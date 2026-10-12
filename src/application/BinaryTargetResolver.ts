@@ -17,7 +17,7 @@ import {
 import { AnalysisCancelledError } from "../domain/analysisErrorCore.js";
 import type { BinaryTarget } from "../domain/binaryTargetTypes.js";
 import { err, ok, type Result } from "../domain/result.js";
-import { readMipsElfAbiFlags } from "./MipsElfAbiFlags.js";
+import { readMipsElfMetadata } from "./MipsElfMetadata.js";
 import {
   resolveAppBundleExecutable,
   type ResolvedAppBundle,
@@ -26,9 +26,15 @@ import {
   validateDosComLength,
   type ExecutableFormatHint,
 } from "../domain/dosCom.js";
+import {
+  admitRawBinary,
+  rawBinarySelectionError,
+} from "../domain/rawBinary.js";
+import type { BinaryArchitecture } from "../domain/binaryTargetTypes.js";
 import { mzWindowsHeaderOffset } from "../domain/dosMz.js";
 import {
   hasZipSignature,
+  isZipPackageFormat,
   zipPackageFormatForPath,
 } from "../domain/zipPackageFormat.js";
 
@@ -44,6 +50,8 @@ export interface BinaryTargetResolverOptions {
   readonly hostArchitecture?: NodeJS.Architecture;
   readonly targetKind?: BinaryTarget["kind"];
   readonly formatHint?: ExecutableFormatHint;
+  readonly architecture?: BinaryArchitecture;
+  readonly entryPoint?: string;
   readonly signal?: AbortSignal;
 }
 
@@ -60,7 +68,7 @@ export const parseBinaryTarget = async (
 > => {
   const cwd = options.cwd ?? process.cwd();
   const hostArchitecture = options.hostArchitecture ?? process.arch;
-  const { targetKind, formatHint, signal } = options;
+  const { targetKind, formatHint, signal, architecture, entryPoint } = options;
   const candidate = isAbsolute(input) ? input : resolve(cwd, input);
   try {
     throwIfTargetResolutionCancelled(signal);
@@ -82,16 +90,65 @@ export const parseBinaryTarget = async (
       throwIfTargetResolutionCancelled(signal);
       const metadata = await handle.stat();
       throwIfTargetResolutionCancelled(signal);
+      if (formatHint === "raw-binary") {
+        if (targetKind !== undefined && targetKind !== "executable")
+          return err(
+            new BinaryTargetError(
+              path,
+              "raw-binary format requires an executable target kind",
+              { constraint: "load_selection_rejected" },
+            ),
+          );
+        const admitted = admitRawBinary({
+          architecture,
+          entryPoint,
+          fileBytes: metadata.size,
+        });
+        if (!admitted.ok)
+          return err(
+            new BinaryTargetError(path, admitted.error.reason, {
+              constraint: admitted.error.constraint,
+            }),
+          );
+        return ok({
+          path,
+          sourcePath: canonical,
+          sha256: await sha256Handle(handle, path, metadata, signal),
+          kind: "executable",
+          format: "raw-binary",
+          architecture: admitted.value.architecture,
+          availableArchitectures: [admitted.value.architecture],
+          entryPoint: admitted.value.entryPoint,
+          entryPointSource: admitted.value.entryPointSource,
+        });
+      }
+      const pairing = rawBinarySelectionError({
+        ...(formatHint === undefined ? {} : { format: formatHint }),
+        architecture,
+        entryPoint,
+      });
+      if (pairing !== undefined)
+        return err(
+          new BinaryTargetError(path, pairing, {
+            constraint: "load_selection_rejected",
+          }),
+        );
       if (formatHint === "dos-com") {
         if (targetKind !== undefined && targetKind !== "executable")
           return err(
             new BinaryTargetError(
               path,
               "DOS COM format requires an executable target kind",
+              { constraint: "load_selection_rejected" },
             ),
           );
         const length = validateDosComLength(metadata.size);
-        if (!length.ok) return err(new BinaryTargetError(path, length.error));
+        if (!length.ok)
+          return err(
+            new BinaryTargetError(path, length.error, {
+              constraint: "file_format_rejected",
+            }),
+          );
         return ok({
           path,
           sourcePath: canonical,
@@ -129,7 +186,12 @@ export const parseBinaryTarget = async (
         hostArchitecture,
         signal,
       );
-      if (!detected.ok) return err(new BinaryTargetError(path, detected.error));
+      if (!detected.ok)
+        return err(
+          new BinaryTargetError(path, detected.error, {
+            constraint: "file_format_rejected",
+          }),
+        );
       return ok({
         path,
         sourcePath: process.platform === "win32" ? candidate : canonical,
@@ -193,7 +255,14 @@ const detectArtifactFormat = async (
 ): Promise<
   | Exclude<
       BinaryTarget["format"],
-      "analysis-database" | "mach-o" | "elf" | "pe" | "dos-mz" | "dos-com"
+      | "analysis-database"
+      | "mach-o"
+      | "mach-o-universal"
+      | "elf"
+      | "pe"
+      | "dos-mz"
+      | "dos-com"
+      | "raw-binary"
     >
   | undefined
 > => {
@@ -202,7 +271,19 @@ const detectArtifactFormat = async (
   const magic = Buffer.alloc(8);
   const observed = await handle.read(magic, 0, magic.length, 0);
   throwIfTargetResolutionCancelled(signal);
+  if (
+    observed.bytesRead === 8 &&
+    magic.equals(Buffer.from([0, 0x61, 0x73, 0x6d, 1, 0, 0, 0]))
+  )
+    throw new BinaryTargetError(
+      path,
+      "WebAssembly v1 artifacts are not supported by the native opening route",
+      { constraint: "wasm_requires_static_inspection" },
+    );
   if (hasZipSignature(magic.subarray(0, observed.bytesRead))) {
+    // The HarmonyOS App Pack suffix `.app` is a root-input concept; a nested
+    // ZIP member ending in `.app` keeps the generic zip classification.
+    if (lower.endsWith(".app")) return "app-pack";
     return zipPackageFormatForPath(lower) ?? "zip";
   }
   const named = namedArtifactFormat(lower);
@@ -240,10 +321,17 @@ const namedArtifactFormat = (
 const isArchiveFormat = (
   format: Exclude<
     BinaryTarget["format"],
-    "analysis-database" | "mach-o" | "elf" | "pe" | "dos-mz" | "dos-com"
+    | "analysis-database"
+    | "mach-o"
+    | "mach-o-universal"
+    | "elf"
+    | "pe"
+    | "dos-mz"
+    | "dos-com"
+    | "raw-binary"
   >,
 ): format is Extract<BinaryTarget, { kind: "archive" }>["format"] =>
-  ["zip", "ipa", "apk", "msix", "appx", "asar", "dmg", "pkg"].includes(format);
+  isZipPackageFormat(format) || ["asar", "dmg", "pkg"].includes(format);
 
 const sha256Handle = async (
   handle: FileHandle,
@@ -367,18 +455,23 @@ const readExecutableMetadata = async (
     parsed.value.mips.elfClass !== 32
   )
     return parsed;
-  const abiFlags = await readMipsElfAbiFlags(handle, parsed.value.mips, () =>
-    throwIfTargetResolutionCancelled(signal),
+  const declarations = await readMipsElfMetadata(
+    handle,
+    parsed.value.mips,
+    () => throwIfTargetResolutionCancelled(signal),
   );
-  if (!abiFlags.ok) return abiFlags;
+  if (!declarations.ok) return declarations;
   return ok({
     ...parsed.value,
     mips: {
       ...parsed.value.mips,
-      abiFlags: abiFlags.value.abiFlags,
-      ...(abiFlags.value.limitations.length === 0
+      abiFlags: declarations.value.abiFlags,
+      ...(declarations.value.sharedLoad === undefined
         ? {}
-        : { limitations: abiFlags.value.limitations }),
+        : { sharedLoad: declarations.value.sharedLoad }),
+      ...(declarations.value.limitations.length === 0
+        ? {}
+        : { limitations: declarations.value.limitations }),
     },
   });
 };

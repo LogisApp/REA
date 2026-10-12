@@ -8,6 +8,122 @@ import { createTestTempDirectory } from "../fixtures/temporaryDirectory.js";
 import { cliTest } from "../support/cli/cliFixture.js";
 
 cliTest(
+  "managed CLI retains metadata and CIL after repeated local constructor owner lookups",
+  async ({ cli }) => {
+    const root = await createTestTempDirectory("rea-managed-row-lookup-");
+    const path = join(root, "local-attributes.dll");
+    await writeFile(
+      path,
+      buildManagedPeFixture({
+        additionalEmptyTypes: 512,
+        customAttributeRowCount: 512,
+        customAttributeTypeRaw: (1 << 3) | 2,
+        typeName: "LookupAttribute",
+        extendsRaw: 0,
+        methodName: ".ctor",
+        methodFlags: 0x1886,
+        methodSignature: Buffer.from([0x20, 0x01, 0x01, 0x0e]),
+        ilBody: Buffer.from([0x06, 0x2a]),
+      }),
+    );
+    const artifact = await cli.run({
+      arguments: ["inspect-managed-artifact", path, "--json"],
+    });
+    expect(artifact.exitCode).toBe(0);
+    expect(artifact.json).toMatchObject({
+      normalized_result: {
+        coverage: { state: "complete", issues: [] },
+        attributes: expect.arrayContaining([
+          expect.objectContaining({
+            type_name: "Fixture.LookupAttribute",
+            constructor_token: "0x06000001",
+          }),
+        ]),
+      },
+    });
+    expect(artifact.json).toHaveProperty(
+      "normalized_result.attributes.length",
+      512,
+    );
+    const members = await cli.run({
+      arguments: ["inspect-managed-members", path, "--json"],
+    });
+    expect(members.exitCode).toBe(0);
+    expect(members.json).toMatchObject({
+      normalized_result: {
+        coverage: { state: "complete", issues: [] },
+        types: expect.arrayContaining([
+          expect.objectContaining({ full_name: "Fixture.Empty0" }),
+          expect.objectContaining({ full_name: "Fixture.Empty511" }),
+          expect.objectContaining({ full_name: "Fixture.LookupAttribute" }),
+        ]),
+        methods: [
+          expect.objectContaining({
+            name: ".ctor",
+            declaring_type: "Fixture.LookupAttribute",
+            body: expect.objectContaining({
+              status: "present",
+              instruction_count: 1,
+            }),
+          }),
+        ],
+      },
+    });
+    expect(members.json).toHaveProperty("normalized_result.types.length", 513);
+  },
+);
+
+cliTest(
+  "managed CLI separates .NET Standard API targets from runtime evidence",
+  async ({ cli }) => {
+    const root = await createTestTempDirectory("rea-managed-runtime-family-");
+    for (const [name, targetFramework, readyToRun, runtimeFamily] of [
+      ["standard", ".NETStandard,Version=v2.0", false, "unknown"],
+      ["core", ".NETCoreApp,Version=v8.0", false, "modern-dotnet"],
+      ["standard-r2r", ".NETStandard,Version=v2.0", true, "modern-dotnet"],
+    ] as const) {
+      const path = join(root, `${name}.dll`);
+      await writeFile(
+        path,
+        buildManagedPeFixture({ targetFramework, readyToRun }),
+      );
+      const result = await cli.run({
+        arguments: ["inspect-managed-artifact", path, "--json"],
+      });
+      expect(result.exitCode).toBe(0);
+      expect(result.json).toMatchObject({
+        operation: "inspect_managed_artifact",
+        subject: { local_path: path },
+        normalized_result: {
+          classification: {
+            status: "managed",
+            runtime_family: runtimeFamily,
+            implementation: readyToRun ? "cil-and-ready-to-run" : "cil",
+            evidence: expect.arrayContaining([
+              expect.objectContaining({
+                code: readyToRun
+                  ? "ready-to-run-signature-observed"
+                  : "target-framework-observed",
+                detail: expect.stringContaining(
+                  readyToRun
+                    ? "ReadyToRun signature"
+                    : name === "standard"
+                      ? "does not identify a runtime family"
+                      : "names modern .NET",
+                ),
+                file_offset: expect.any(Number),
+              }),
+            ]),
+          },
+          target_frameworks: [targetFramework],
+          coverage: { state: "complete", issues: [] },
+        },
+      });
+    }
+  },
+);
+
+cliTest(
   "managed CLI preserves evidence, filters, envelopes, and bounded token counts",
   async ({ cli }) => {
     const root = await createTestTempDirectory("rea-managed-cli-output-");

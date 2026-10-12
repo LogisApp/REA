@@ -5,7 +5,7 @@ import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
 // Route production MCP before importing Incur. Incur owns registration helpers
-// such as `mcp add`, while only dist/main.js may serve the stdio tool catalog.
+// such as `mcp add`, while the MCP runtime serves the stdio tool catalog.
 const args = process.argv.slice(2);
 const { default: packageJson } = await import("../package.json", {
   with: { type: "json" },
@@ -31,10 +31,14 @@ if (
 }
 
 const runtimeFiles = isMcpMode
-  ? ["dist/main.js"]
+  ? ["dist/mcp/main.js"]
   : isMcpDoctorMode
-    ? ["dist/main.js", "dist/mcpDoctor.js"]
-    : ["dist/cli.js", "dist/cliOutput.js", "dist/cli/streamedJsonOutput.js"];
+    ? ["dist/mcp/main.js", "dist/cli-runtime/mcpDoctor.js"]
+    : [
+        "dist/cli-runtime/cli.js",
+        "dist/cli-runtime/cliOutput.js",
+        "dist/cli-runtime/streamedJsonOutput.js",
+      ];
 
 if (!(await compiledRuntimeExists(runtimeFiles))) {
   process.stderr.write(
@@ -42,10 +46,11 @@ if (!(await compiledRuntimeExists(runtimeFiles))) {
   );
   process.exitCode = 1;
 } else if (isMcpMode) {
-  const { runEntrypoint } = await import("../dist/main.js");
+  const { runEntrypoint } = await import("../dist/mcp/main.js");
   await runEntrypoint();
 } else if (isMcpDoctorMode) {
-  const { runProductionMcpDoctorCli } = await import("../dist/mcpDoctor.js");
+  const { runProductionMcpDoctorCli } =
+    await import("../dist/cli-runtime/mcpDoctor.js");
   const result = await runProductionMcpDoctorCli(args.slice(2), {
     dispatcherPath: fileURLToPath(import.meta.url),
     packageRoot,
@@ -53,14 +58,14 @@ if (!(await compiledRuntimeExists(runtimeFiles))) {
   process.stdout.write(result.output);
   process.exitCode = result.exitCode;
 } else {
-  const { createCli } = await import("../dist/cli.js");
+  const { createCli } = await import("../dist/cli-runtime/cli.js");
   const { createStreamedCliJsonOutput } =
-    await import("../dist/cli/streamedJsonOutput.js");
+    await import("../dist/cli-runtime/streamedJsonOutput.js");
   const {
     renderCliOutputArgumentError,
     renderEmptyFilteredCliOutput,
     validateCliOutputArguments,
-  } = await import("../dist/cliOutput.js");
+  } = await import("../dist/cli-runtime/cliOutput.js");
   const outputArguments = validateCliOutputArguments(args);
   if (!outputArguments.ok) {
     process.stdout.write(renderCliOutputArgumentError(outputArguments));

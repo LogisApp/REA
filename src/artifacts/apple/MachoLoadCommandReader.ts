@@ -234,7 +234,7 @@ const readFatSlices = async (
 ): Promise<MachoSlice[]> => {
   const slices: MachoSlice[] = [];
   for (const declaration of declarations) {
-    const { index, offset, size: length, cpuType, cpuSubtype } = declaration;
+    const { offset, size: length, cpuType, cpuSubtype } = declaration;
     const rangeIssue = validateFatSlice(declaration, size, tableEnd);
     if (rangeIssue !== null)
       throw new MachoFormatIssue(
@@ -414,7 +414,14 @@ const decodeCommand = (
         "malformed",
         `load command ${index} is too short for LC_BUILD_VERSION`,
       );
-    const platform = viewOf(body).getUint32(8, true);
+    const view = viewOf(body);
+    const toolCount = view.getUint32(20, true);
+    if (toolCount > Math.floor((body.byteLength - 24) / 8))
+      throw new MachoFormatIssue(
+        "malformed",
+        `load command ${index} LC_BUILD_VERSION tool records exceed cmdsize`,
+      );
+    const platform = view.getUint32(8, true);
     slice.platforms.push(platform);
     return;
   }
@@ -519,12 +526,16 @@ const CPU_TYPE_X86 = 7;
 const CPU_TYPE_ARM = 12;
 const CPU_SUBTYPE_MASK = 0xff000000;
 const CPU_SUBTYPE_ARM64E = 2;
+const CPU_SUBTYPE_ARM64E_X1 = 12;
 const CPU_SUBTYPE_X86_64_H = 8;
 
 const architectureName = (cpuType: number, cpuSubtype: number): string => {
   const subtype = cpuSubtype & ~CPU_SUBTYPE_MASK;
   if (cpuType === (CPU_TYPE_ARM | CPU_ARCH_ABI64))
-    return subtype === CPU_SUBTYPE_ARM64E ? "arm64e" : "arm64";
+    // Both pointer-authentication subtypes belong to the arm64e family.
+    return subtype === CPU_SUBTYPE_ARM64E || subtype === CPU_SUBTYPE_ARM64E_X1
+      ? "arm64e"
+      : "arm64";
   if (cpuType === (CPU_TYPE_ARM | CPU_ARCH_ABI64_32)) return "arm64_32";
   if (cpuType === (CPU_TYPE_X86 | CPU_ARCH_ABI64))
     return subtype === CPU_SUBTYPE_X86_64_H ? "x86_64h" : "x86_64";

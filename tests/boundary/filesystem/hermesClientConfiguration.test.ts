@@ -151,6 +151,29 @@ mcp_servers:
     });
   });
 
+  it("keeps unrelated long YAML scalars on their original lines", async () => {
+    const { home, client } = await hermesClient();
+    const prompt = "Keep this sentence on one line. ".repeat(8).trim();
+    const original = `# Hermes configuration
+model:
+  personality: ${prompt}
+mcp_servers:
+  other:
+    command: other-server
+`;
+    await writeFile(client.configPath, original);
+    expect(
+      (await configureClientConfiguration(client, {}, command)).status,
+    ).toBe("configured");
+    const text = await readFile(client.configPath, "utf8");
+    expect(text).toContain(`  personality: ${prompt}\n`);
+    expect(parseYaml(text)).toMatchObject({ model: { personality: prompt } });
+    expect((await systemUninstallHost(home).removeClient(client)).status).toBe(
+      "removed",
+    );
+    expect(await readFile(client.configPath, "utf8")).toBe(original);
+  });
+
   it("creates config.yaml when Hermes has no configuration yet", async () => {
     const { client } = await hermesClient();
     expect(
@@ -162,4 +185,28 @@ mcp_servers:
       },
     });
   });
+
+  it.each(["", "\n"])(
+    "configures an empty config.yaml %j as a new document",
+    async (original) => {
+      const { home, client } = await hermesClient();
+      await writeFile(client.configPath, original);
+      expect(
+        (await configureClientConfiguration(client, {}, command)).status,
+      ).toBe("configured");
+      expect(parseYaml(await readFile(client.configPath, "utf8"))).toEqual({
+        mcp_servers: {
+          rea: { command: command[0], args: command.slice(1), enabled: true },
+        },
+      });
+      expect(
+        (
+          await readClientRegistrationStatuses(home, undefined, {
+            platform: process.platform,
+            environment: {},
+          })
+        ).find(({ client: name }) => name === "hermes"),
+      ).toMatchObject({ state: "aligned", command });
+    },
+  );
 });

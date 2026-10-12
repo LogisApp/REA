@@ -182,10 +182,17 @@ public final class ReaGhidraBridge extends HeadlessScript {
         }
         sessionDefaultAddressSpace =
             currentProgram.getAddressFactory().getDefaultAddressSpace();
-        if (currentProgram.getExecutableFormat().equals("Raw Binary") &&
-            !currentProgram.getOptions(ghidra.program.model.listing.Program.PROGRAM_INFO)
-                .getBoolean("REA DOS COM prepared", false)) {
-            throw new IllegalStateException("REA DOS COM entry/context preparation failed");
+        if (currentProgram.getExecutableFormat().equals("Raw Binary")) {
+            boolean dosCom = currentProgram.getLanguageID().getIdAsString()
+                .equals("x86:LE:16:Real Mode");
+            String preparation = dosCom ? "REA DOS COM prepared" : "REA raw binary prepared";
+            if (!currentProgram.getOptions(ghidra.program.model.listing.Program.PROGRAM_INFO)
+                .getBoolean(preparation, false)) {
+                throw new IllegalStateException(
+                    dosCom ? "REA DOS COM entry/context preparation failed" :
+                        "REA raw binary entry preparation failed"
+                );
+            }
         }
         if (!Application.getApplicationVersion().equals(descriptor.providerVersion)) {
             throw new IllegalStateException("Ghidra provider version does not match the session");
@@ -375,7 +382,7 @@ public final class ReaGhidraBridge extends HeadlessScript {
             case "search_procedures" -> search(request.params, true);
             case "search_strings" -> search(request.params, false);
             case "inspect_native_data_type" -> inspectNativeDataType(request.params);
-            case "inspect_native_instruction" -> inspectNativeInstruction(request.params);
+            case "inspect_native_instruction" -> inspectNativeInstruction(request.params, true);
             case "resolve_native_call_targets" -> resolveNativeCallTargets(request.params);
             case "xrefs" -> xrefs(request.params);
             case "analyze_function" -> {
@@ -443,6 +450,11 @@ public final class ReaGhidraBridge extends HeadlessScript {
         String seeds = currentProgram.getOptions(ghidra.program.model.listing.Program.PROGRAM_INFO)
             .getString("REA analysis seeds", null);
         if (seeds != null) result.add("analysis_seeds", JsonParser.parseString(seeds));
+        // Written by ReaGhidraMipsSoftFloat after analysis; REA requires it
+        // exactly when the committed profile declares soft-float storage.
+        String softFloat = currentProgram.getOptions(ghidra.program.model.listing.Program.PROGRAM_INFO)
+            .getString("REA MIPS soft-float storage", null);
+        if (softFloat != null) result.add("mips_soft_float_storage", JsonParser.parseString(softFloat));
         return result;
     }
 
@@ -885,7 +897,7 @@ public final class ReaGhidraBridge extends HeadlessScript {
         return item;
     }
 
-    private JsonObject inspectNativeInstruction(JsonObject params) throws Exception {
+    private JsonObject inspectNativeInstruction(JsonObject params, boolean includeIncoming) throws Exception {
         requireKeys(params, Set.of("document", "address"));
         requireDocument(params);
         Address address = requireAddress(params, "address");
@@ -896,6 +908,19 @@ public final class ReaGhidraBridge extends HeadlessScript {
         result.add("procedure", function == null ? JsonNull.INSTANCE : GSON.toJsonTree(canonicalAddress(function.getEntryPoint())));
         result.addProperty("architecture", currentProgram.getLanguageID().getIdAsString());
         result.addProperty("mode", currentProgram.getLanguage().getLanguageDescription().getVariant());
+        if (currentProgram.getLanguageID().getIdAsString().startsWith("MIPS:")) {
+            JsonArray decoderContext = new JsonArray();
+            var modeRegister = currentProgram.getRegister("ISA_MODE");
+            if (modeRegister != null) {
+                var modeValue = currentProgram.getProgramContext().getValue(modeRegister, address, false);
+                JsonObject context = new JsonObject();
+                context.addProperty("register", modeRegister.getName());
+                context.add("value", modeValue == null ? JsonNull.INSTANCE : GSON.toJsonTree(modeValue.toString()));
+                context.addProperty("source", "ghidra-program-context");
+                decoderContext.add(context);
+            }
+            result.add("decoder_context", decoderContext);
+        }
         JsonArray operands = new JsonArray();
         JsonArray references = new JsonArray();
         JsonArray destinations = new JsonArray();
@@ -968,6 +993,19 @@ public final class ReaGhidraBridge extends HeadlessScript {
         result.add("operands", operands);
         result.add("flow", flow);
         result.add("references", references);
+        if (includeIncoming) {
+            TreeMap<String, Reference> incoming = new TreeMap<>();
+            ReferenceIterator incomingIterator = currentProgram.getReferenceManager().getReferencesTo(address);
+            while (incomingIterator.hasNext()) {
+                monitor.checkCancelled();
+                addReference(incoming, incomingIterator.next());
+            }
+            List<Reference> orderedIncoming = new ArrayList<>(incoming.values());
+            orderedIncoming.sort(REFERENCE_ORDER);
+            JsonArray incomingReferences = new JsonArray();
+            for (Reference reference : orderedIncoming) incomingReferences.add(instructionReference(reference));
+            result.add("incoming_references", incomingReferences);
+        }
         List<String> limitations = new ArrayList<>(List.of("Operand components are Ghidra Listing decoder tokens; effective memory base/index/displacement roles and per-instruction context mode are unavailable. The mode field is the program language variant."));
         if (flow.get("kind").getAsString().equals("terminal")) limitations.add("No RETURN operation was observed in the provider's instruction p-code; terminal classification remains generic.");
         result.add("limitations", GSON.toJsonTree(limitations));
@@ -975,7 +1013,7 @@ public final class ReaGhidraBridge extends HeadlessScript {
     }
 
     private JsonObject resolveNativeCallTargets(JsonObject params) throws Exception {
-        JsonObject instruction = inspectNativeInstruction(params);
+        JsonObject instruction = inspectNativeInstruction(params, false);
         JsonObject result = new JsonObject();
         result.add("call_site", instruction.get("address"));
         result.add("procedure", instruction.get("procedure"));

@@ -1,3 +1,6 @@
+import type { WasmArtifactService } from "../application/wasm/WasmArtifactService.js";
+import { createWasmArtifactService } from "../composition/wasm.js";
+import { registerWasmTools } from "./registerWasmTools.js";
 import { snapshotEnvironment } from "../process/snapshotEnvironment.js";
 import { createPeResourcesService } from "../composition/binaryDiagnostics.js";
 import { registerPeResourcesTool } from "./registerPeResourcesTool.js";
@@ -6,6 +9,9 @@ import { createEvmInterfaceService } from "../composition/evm.js";
 import { registerEvmTools } from "./registerEvmTools.js";
 import { registerRecordedCrashTools } from "./registerRecordedCrashTools.js";
 import { createRecordedCrashService } from "../composition/binaryDiagnostics.js";
+import { createGoBinaryService } from "../composition/go.js";
+import type { GoBinaryService } from "../application/go/GoBinaryService.js";
+import { registerGoTools } from "./registerGoTools.js";
 import type { RecordedCrashService } from "../application/binaryDiagnostics/RecordedCrashService.js";
 import { registerAnalysisViewTool } from "./registerAnalysisViewTool.js";
 import { registerBinaryDiagnosticsTools } from "./registerBinaryDiagnosticsTools.js";
@@ -103,9 +109,11 @@ const ACTIVE_TARGET_INSTRUCTIONS =
 export interface CreateServerOptions {
   readonly environment?: Readonly<NodeJS.ProcessEnv>;
   readonly delivery?: ToolResultDelivery;
+  readonly wasmArtifact?: WasmArtifactService;
   readonly evmInterface?: EvmInterfaceService;
   readonly logger?: Logger;
   readonly binaryLayout?: BinaryLayoutService;
+  readonly goBinary?: GoBinaryService;
   readonly recordedCrash?: RecordedCrashService;
   readonly firmwareAnalysis?: FirmwareAnalysisPort;
   readonly javascriptRecovery?: JavaScriptRecoveryPort;
@@ -139,6 +147,9 @@ const installSessionToolAvailability = (
   const policy = sessionAvailabilityPolicy(options.availabilityPolicy, {
     optionalProviderLoadFailures: options.optionalProviderLoadFailures,
     optionalFeatures: {
+      wasmArtifactEnabled:
+        options.wasmArtifact !== undefined ||
+        isAbsolute(environment.REA_WABT_BIN_DIRECTORY ?? ""),
       evmInterfaceEnabled: options.evmInterface !== undefined || linuxX64,
       webModuleResolutionEnabled:
         options.webModuleTrace !== undefined ||
@@ -209,6 +220,8 @@ export const createServer = (
     options.evmInterface ?? createEvmInterfaceService(environment);
   const webSourceLocation =
     options.webSourceLocation ?? createWebSourceLocationService(environment);
+  const webModuleTrace =
+    options.webModuleTrace ?? createWebModuleTraceService(environment);
   const javascriptRecovery =
     options.javascriptRecovery ?? createJavaScriptRecoveryProvider(environment);
   const artifactResources = new ArtifactResourceScope();
@@ -221,6 +234,7 @@ export const createServer = (
     delivery,
     evmInterface,
     webSourceLocation,
+    webModuleTrace,
     javascriptRecovery,
   };
   const startedAt = new Date().toISOString();
@@ -232,6 +246,8 @@ export const createServer = (
   );
   const android =
     options.androidAnalysis ?? createAndroidAnalysisProvider(environment);
+  const wasmArtifact =
+    options.wasmArtifact ?? createWasmArtifactService(environment);
   const apktool =
     options.apktoolAnalysis ??
     createApktoolResourceAnalysisProvider(environment);
@@ -242,11 +258,13 @@ export const createServer = (
   const closeProviders = (): Promise<void> => {
     providerClose ??= Promise.allSettled([
       android.close(),
+      wasmArtifact.close(),
       apktool.close(),
       jeb.close(),
       adbDevice.close(),
       evmInterface.close(),
       webSourceLocation.close(),
+      webModuleTrace.close(),
       javascriptRecovery.close?.() ?? Promise.resolve(),
       artifactResources.close(),
       firmwareAnalysis.close(),
@@ -308,7 +326,13 @@ export const createServer = (
     for (const result of results)
       if (result.status === "rejected") throw result.reason;
   };
-  registerConfiguredAnalysisTools(toolContext, android, jeb, firmwareAnalysis);
+  registerConfiguredAnalysisTools(
+    toolContext,
+    android,
+    wasmArtifact,
+    jeb,
+    firmwareAnalysis,
+  );
   registerAdbTools(
     server,
     new AdbDeviceAnalysisService(adbDevice),
@@ -328,6 +352,7 @@ export const createServer = (
   if (session !== undefined) {
     registerSessionTools(server, session, toolLogger, {
       ...selectedOptions,
+      artifactResources,
       ...(availability === undefined
         ? {}
         : { availabilityPolicy: availability.policy }),
@@ -374,6 +399,7 @@ const registerConfiguredAnalysisTools = (
     withAdmittedAnalysis,
   }: ServerToolContext,
   android: AndroidAnalysisPort,
+  wasmArtifact: WasmArtifactService,
   jeb: JebAnalysisPort,
   firmwareAnalysis: FirmwareAnalysisService,
 ): void => {
@@ -409,6 +435,20 @@ const registerConfiguredAnalysisTools = (
   registerPeResourcesTool(
     server,
     createPeResourcesService(),
+    toolLogger,
+    recordEvidence,
+    withAdmittedAnalysis,
+  );
+  registerGoTools(
+    server,
+    options.goBinary ?? createGoBinaryService(),
+    toolLogger,
+    recordEvidence,
+    withAdmittedAnalysis,
+  );
+  registerWasmTools(
+    server,
+    wasmArtifact,
     toolLogger,
     recordEvidence,
     withAdmittedAnalysis,

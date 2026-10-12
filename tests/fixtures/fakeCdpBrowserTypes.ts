@@ -93,6 +93,7 @@ export interface FakeOptions {
   readonly webSocketWithoutFrames?: boolean;
   readonly invalidBinaryWebSocketEvent?: boolean;
   readonly sourceMapBody?: string;
+  readonly sourceMapRedirect?: string;
   readonly sessionTimeline?:
     | "same_origin"
     | "outside_policy"
@@ -113,6 +114,8 @@ export interface FakeOptions {
   readonly webMcpChildRecoversAfterTransient?: boolean;
   readonly webMcpChildNavigatesAllowed?: boolean;
   readonly electronFileUrl?: string;
+  /** Omit attached from the Electron page's HTTP discovery target. */
+  readonly omitElectronTargetAttachmentState?: boolean;
   readonly duplicateElectronInventory?: boolean;
   readonly electronInventoryCount?: number;
   readonly urlShapedAllowedTitle?:

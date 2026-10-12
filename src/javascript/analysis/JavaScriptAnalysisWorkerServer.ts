@@ -4,11 +4,15 @@ import { join } from "node:path";
 import { createInterface } from "node:readline";
 import { getHeapStatistics } from "node:v8";
 import { AnalysisResourceConstraintError } from "../../domain/analysisErrorCore.js";
+import { javaScriptRuntime } from "../../domain/runtimeVersion.js";
 import type { JavaScriptArtifactFile } from "../../domain/javascript/javascriptArtifactFiles.js";
 import type { JavaScriptStaticAnalysis } from "../../domain/javascript/javascriptStaticAnalysisTypes.js";
 import type { JavaScriptModuleSemanticIr } from "../../domain/javascript/javascriptModuleSemanticIr.js";
 import type { JavaScriptSemanticFileProjection } from "../../domain/javascript/javascriptSemanticFileProjection.js";
-import { writeJavaScriptAnalysisTransfer } from "./JavaScriptAnalysisTransfer.js";
+import {
+  javaScriptTransferByteBudget,
+  writeJavaScriptAnalysisTransfer,
+} from "./JavaScriptAnalysisTransfer.js";
 import { javaScriptWorkerStaticAnalysisSchema } from "./JavaScriptAnalysisWorkerSchemas.js";
 import {
   JAVASCRIPT_ANALYSIS_WORKER_DEFAULTS as DEFAULTS,
@@ -58,7 +62,10 @@ export const serveJavaScriptAnalysisWorker = async (
   const requests = input[Symbol.asyncIterator]();
   await send({
     kind: "ready",
-    heap_limit_bytes: getHeapStatistics().heap_size_limit,
+    heap_limit_bytes:
+      javaScriptRuntime(process.versions).id === "node"
+        ? getHeapStatistics().heap_size_limit
+        : null,
   });
   try {
     for (;;) {
@@ -91,6 +98,7 @@ const analyzeJob = async (
   requests: AsyncIterator<string>,
 ): Promise<void> => {
   try {
+    let resultBudgetBytes = 0;
     const source = await readFile(join(root, `${request.id}.source`), "utf8");
     if (
       createHash("sha256").update(source).digest("hex") !== request.text_sha256
@@ -144,7 +152,8 @@ const analyzeJob = async (
             throw new TypeError(
               "JavaScript worker admission names a different source job",
             );
-          return admission.semantic_result_budget_bytes;
+          resultBudgetBytes = admission.semantic_result_budget_bytes;
+          return resultBudgetBytes;
         },
       },
     );
@@ -156,6 +165,7 @@ const analyzeJob = async (
             join(root, `${request.id}.records`),
             result.module,
             result.projection,
+            javaScriptTransferByteBudget(resultBudgetBytes),
           );
     await send({ kind: "complete", id: request.id, descriptor });
   } catch (cause: unknown) {

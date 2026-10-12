@@ -8,12 +8,16 @@ import {
   type ClientConfigurationDocument,
 } from "./ClientConfigurationDocument.js";
 import { PRODUCT_IDENTITY } from "../identity.js";
+import { compareUnicodeCodePoints } from "../domain/unicodeCodePointOrder.js";
+import { dshDocument } from "./DshCordisPatch.js";
 
 /** Read explicit REA overrides without dropping peers when one value is invalid. */
 export const clientRegistrationEnvironment = (
   parsed: ClientConfigurationDocument | undefined,
   overrides: Readonly<Record<string, string>> = {},
 ): Result<Readonly<Record<string, string>>, ConfigurationError> => {
+  if (parsed?.dialect === "dsh")
+    return dshDocument(parsed.document).environment(overrides);
   const key =
     parsed?.dialect === "opencode" || parsed?.dialect === "opencode_v2"
       ? "environment"
@@ -47,7 +51,7 @@ export const clientRegistrationEnvironment = (
   return ok(
     Object.fromEntries(
       Object.entries(environment).sort(([left], [right]) =>
-        left.localeCompare(right),
+        compareUnicodeCodePoints(left, right),
       ),
     ),
   );

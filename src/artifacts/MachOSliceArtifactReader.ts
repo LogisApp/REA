@@ -8,6 +8,7 @@ import {
   type NativeCommandRunner,
 } from "../native/CommandRunner.js";
 import {
+  lipoSubtypeBits,
   parseLipoArchitectures,
   type LipoArchitecture,
 } from "../native/parsers/lipo.js";
@@ -39,6 +40,7 @@ export class MachOSliceArtifactReader implements ArtifactReader {
   #ownedSource: OwnedFileHandle | undefined;
   #pendingSource: Promise<StableRegularFileDescriptor> | undefined;
   readonly #entries = new Map<string, ArtifactEntry>();
+  readonly #pendingCommands = new Set<Promise<unknown>>();
   readonly #ownsSource: boolean;
   #closed = false;
   #closePromise: Promise<void> | undefined;
@@ -59,16 +61,46 @@ export class MachOSliceArtifactReader implements ArtifactReader {
     this.#entries.clear();
     const source = await this.#ensureSource();
     await this.#verifySource(source);
-    const captured = await this.runner.run(
+    if (this.#closed)
+      throw new ArtifactReaderFailure(
+        "unavailable",
+        "Universal Mach-O reader is closed",
+      );
+    const command = this.runner.run(
       "lipo",
       ["-detailed_info", this.path],
       signal === undefined ? {} : { signal },
     );
+    this.#pendingCommands.add(command);
+    let captured: Awaited<typeof command>;
+    try {
+      captured = await command;
+    } finally {
+      this.#pendingCommands.delete(command);
+    }
     if (!captured.ok)
       throw new ArtifactReaderFailure(
         captured.error.reason === "cancelled" ? "cancelled" : "unavailable",
         "lipo could not enumerate universal Mach-O slices",
-        { cause: captured.error },
+        {
+          cause: captured.error,
+          ...(captured.error.cleanupFailure === null &&
+          captured.error.cleanupResources.length === 0
+            ? {}
+            : {
+                cleanup: {
+                  reason:
+                    captured.error.cleanupFailure ??
+                    "Native command cleanup remains unverified",
+                  resources: [...captured.error.cleanupResources],
+                },
+              }),
+        },
+      );
+    if (this.#closed)
+      throw new ArtifactReaderFailure(
+        "unavailable",
+        "Universal Mach-O reader closed during slice discovery",
       );
     this.#command = {
       tool: captured.value.tool,
@@ -262,11 +294,47 @@ export class MachOSliceArtifactReader implements ArtifactReader {
 
   async close(): Promise<void> {
     this.#closed = true;
-    this.#closePromise ??= this.#closeSource().catch((cause: unknown) => {
+    this.#closePromise ??= this.#releaseResources().catch((cause: unknown) => {
       this.#closePromise = undefined;
       throw cause;
     });
     return this.#closePromise;
+  }
+
+  async #releaseResources(): Promise<void> {
+    await Promise.allSettled(this.#pendingCommands);
+    let cleanup: ArtifactReaderFailure["cleanup"];
+    try {
+      const failures = (await this.runner.retryCleanup?.()) ?? [];
+      if (failures.length > 0)
+        cleanup = {
+          reason: failures
+            .map(
+              ({ reason, resources }) => `${resources.join(", ")}: ${reason}`,
+            )
+            .join("; "),
+          resources: [
+            ...new Set(failures.flatMap(({ resources }) => resources)),
+          ],
+        };
+    } catch (cause: unknown) {
+      cleanup = ArtifactReaderFailure.cleanupObservation(
+        cause,
+        "native-command-process-cleanup",
+      );
+    }
+    try {
+      await this.#closeSource();
+    } catch (cause: unknown) {
+      if (cleanup === undefined) throw cause;
+      throw ArtifactReaderFailure.withCleanup(cause, cleanup);
+    }
+    if (cleanup !== undefined)
+      throw new ArtifactReaderFailure(
+        "unavailable",
+        "Native command process cleanup remains incomplete",
+        { cleanup },
+      );
   }
 
   async #ensureSource(): Promise<StableRegularFileDescriptor> {
@@ -384,12 +452,25 @@ const lipoMatchesSlice = (
     (reported.size === null || reported.size === observed.slice_size) &&
     (reported.cpu_type_code === null ||
       reported.cpu_type_code === observedCpuType) &&
-    (reported.cpu_subtype_code === null ||
-      reported.cpu_subtype_code === observedCpuSubtype) &&
+    lipoSubtypeMatches(reported, observedCpuSubtype) &&
     (reported.alignment === null ||
       observed.fat_alignment_exponent === null ||
       reported.alignment === 2 ** observed.fat_alignment_exponent)
   );
+};
+
+/**
+ * Compare the complete subtype when lipo printed its capability byte, and
+ * otherwise only the subtype bits its record names.
+ */
+const lipoSubtypeMatches = (
+  reported: LipoArchitecture,
+  observedCpuSubtype: number,
+): boolean => {
+  if (reported.cpu_subtype_code !== null)
+    return reported.cpu_subtype_code === observedCpuSubtype;
+  const bits = lipoSubtypeBits(reported.cpu_subtype);
+  return bits === null || bits === (observedCpuSubtype & 0x00ffffff);
 };
 
 /**

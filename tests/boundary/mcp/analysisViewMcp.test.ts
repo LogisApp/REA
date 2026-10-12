@@ -1,5 +1,14 @@
+import { API_SURFACE_EXAMPLE } from "../../../src/contracts/analysisViewApiSurfaceExample.js";
+import { createHash } from "node:crypto";
+import { readFile, writeFile } from "node:fs/promises";
+import { WebNetworkCaptureService } from "../../../src/application/WebNetworkCaptureService.js";
+import { decodeHarCapture } from "../../../src/browser/history/HarCapture.js";
+import { join } from "node:path";
+import { apiSurfaceHar } from "../../fixtures/historicalHar.js";
+import { createTestTempDirectory } from "../../fixtures/temporaryDirectory.js";
 import { parseMcpToolError } from "../../fixtures/mcpToolError.js";
 import { Client, InMemoryTransport } from "@modelcontextprotocol/client";
+import { STDIO_DEFAULT_MAX_BUFFER_SIZE } from "@modelcontextprotocol/server";
 import { Ajv2020 } from "ajv/dist/2020.js";
 import { expect, it, onTestFinished } from "vitest";
 import { z } from "zod";
@@ -17,23 +26,33 @@ import {
   createJavaScriptApplicationNode,
 } from "../../../src/domain/javascript/javascriptApplicationGraph.js";
 import { createServer } from "../../../src/server/createServer.js";
+import { connectGhidraMcp } from "./ghidraMcpHarness.js";
 import {
   analysisViewJavaScriptEvidence,
   analysisViewJavaScriptAnalysisWithSource,
   analysisViewBindJavaScriptGraphs,
   analysisViewLayoutEvidence,
   analysisViewLayoutFixture,
+  analysisViewCaptureFixture,
+  analysisViewCaptureEvidence,
+  analysisViewObjectDenseCapture,
 } from "../../fixtures/analysisView.js";
 import { createTestBinarySession } from "../../fixtures/binarySession.js";
 import { BINARY_LAYOUT_TEST_PROVIDER } from "../../fixtures/binaryDiagnostics/layout.js";
 
-const connect = async (binaryLayout?: BinaryLayoutService) => {
+const connect = async (
+  binaryLayout?: BinaryLayoutService,
+  webNetworkCapture?: WebNetworkCaptureService,
+) => {
   const session = createTestBinarySession(() => {
     throw new Error("selected views must not start a deep provider");
   });
   const server = createServer(
     { kind: "session", session },
-    binaryLayout === undefined ? {} : { binaryLayout },
+    {
+      ...(binaryLayout === undefined ? {} : { binaryLayout }),
+      ...(webNetworkCapture === undefined ? {} : { webNetworkCapture }),
+    },
   );
   const client = new Client({ name: "analysis-view-mcp", version: "1" });
   onTestFinished(async () => {
@@ -176,6 +195,18 @@ it("advertises exact schemas and projects one layout section from retained Evide
   expect(ajv.validateSchema(outputSchema)).toBe(true);
   expect(
     ajv.validate(inputSchema, {
+      source: { kind: "inline", evidence: analysisViewLayoutEvidence() },
+      view: { kind: "summary" },
+    }),
+  ).toBe(true);
+  expect(
+    ajv.validate(inputSchema, {
+      source: { kind: "inline", evidence: {} },
+      view: { kind: "summary" },
+    }),
+  ).toBe(false);
+  expect(
+    ajv.validate(inputSchema, {
       source: {
         kind: "retained-evidence",
         evidence_id: `ev_${"a".repeat(64)}`,
@@ -249,6 +280,100 @@ it("reports a tampered inline Evidence ID at its full MCP source path", async ()
         },
       ],
     },
+  });
+});
+
+it("admits portable captures before SDK Evidence parsing and preserves capture caveats", async () => {
+  const { client } = await connect();
+  const dense = analysisViewCaptureEvidence(analysisViewObjectDenseCapture());
+  const refused = await client.callTool({
+    name: "inspect_analysis_view",
+    arguments: {
+      source: { kind: "inline", evidence: dense },
+      view: { kind: "api-surface" },
+    },
+  });
+  expect(parseMcpToolError(refused).error).toMatchObject({
+    code: "resource_constraint",
+    details: { resource: "memory" },
+  });
+  await client.ping();
+
+  const capture = analysisViewCaptureFixture();
+  capture.records = capture.records.slice(0, 1);
+  capture.total_records = 1;
+  const caveat = "Producer omitted exchanges before capture startup.";
+  capture.limitations = [caveat, caveat];
+  capture.records[0]!.reported = {
+    request: { method: "GET", url: "https://api.test/a" },
+    response: { status: 200, content: { mimeType: "\u00a0text/plain\u00a0" } },
+  };
+  const parent = analysisViewCaptureEvidence(capture);
+  expect(parent.limitations).not.toContain(caveat);
+  const response = await client.callTool({
+    name: "inspect_analysis_view",
+    arguments: {
+      source: { kind: "inline", evidence: parent },
+      view: { kind: "api-surface" },
+    },
+  });
+  const result = parseEvidence(response.structuredContent);
+  expect(result.limitations.filter((value) => value === caveat)).toEqual([
+    caveat,
+  ]);
+  expect(result.normalized_result).toMatchObject({
+    groups: [{ content_types: [], flags: ["single-sample"] }],
+    limitations: expect.arrayContaining([caveat]),
+    unknowns: [
+      "Some retained records have unavailable status or content type values.",
+    ],
+  });
+});
+
+it("rejects inconsistent portable coverage and accepts caller-ordered ordinal subsets", async () => {
+  const { client } = await connect();
+  for (const [total, ordinals] of [
+    [0, [0]],
+    [2, [0, 0]],
+    [2, [2]],
+  ] as const) {
+    const capture = analysisViewCaptureFixture();
+    capture.total_records = total;
+    capture.records = ordinals.map((ordinal) => ({
+      ...capture.records[0]!,
+      ordinal,
+    }));
+    const response = await client.callTool({
+      name: "inspect_analysis_view",
+      arguments: {
+        source: {
+          kind: "inline",
+          evidence: analysisViewCaptureEvidence(capture),
+        },
+        view: { kind: "api-surface" },
+      },
+    });
+    expect(parseMcpToolError(response).error.code).toBe("invalid_request");
+  }
+  const capture = analysisViewCaptureFixture();
+  capture.records = [capture.records[8]!, capture.records[1]!];
+  const response = await client.callTool({
+    name: "inspect_analysis_view",
+    arguments: {
+      source: {
+        kind: "inline",
+        evidence: analysisViewCaptureEvidence(capture),
+      },
+      view: { kind: "api-surface" },
+    },
+  });
+  expect(
+    parseEvidence(response.structuredContent).normalized_result,
+  ).toMatchObject({
+    records: { examined: 2, total: 15 },
+    limitations: expect.arrayContaining([
+      "Parent contains an ordinal subset; the surface covers only retained records.",
+    ]),
   });
 });
 
@@ -455,6 +580,95 @@ it("retains an oversized native assembly row and permits a subsequent smaller vi
   await client.ping();
 });
 
+it("reads successive native source pages directly from a completed-result transport error", async () => {
+  const pseudocode = "int fixture_add(int a, int b) { return a + b; }\n".repeat(
+    150_000,
+  );
+  const harness = await connectGhidraMcp(
+    "native-continuation",
+    async (operation) => {
+      if (operation !== "analyze_function")
+        throw new Error(`Unexpected provider operation: ${operation}`);
+      return ok({
+        value: {
+          ...functionDossierSchema.parse(ghidraFunctionDossier()),
+          pseudocode,
+        },
+        limitations: [],
+      });
+    },
+  );
+  onTestFinished(() => harness.close());
+  const { mcp: client, session, calls } = harness;
+  const failed = await client.callTool({
+    name: "analyze_function",
+    arguments: { procedure: "0x401000" },
+  });
+  expect(failed.isError).toBe(true);
+  const limits = z
+    .object({
+      error: z.object({
+        details: z.object({ reported_limits: jsonObjectSchema }),
+      }),
+    })
+    .parse(parseMcpToolError(failed)).error.details.reported_limits;
+  const reference = z
+    .object({
+      kind: z.literal("retained-evidence"),
+      evidence_id: z.string(),
+    })
+    .parse(limits.evidence_reference);
+  const parent = parseEvidence(session.evidenceById(reference.evidence_id));
+  expect(parent.operation).toBe("analyze_function");
+  expect(parent.parameters).toMatchObject({ procedure: "0x401000" });
+  const call = z
+    .object({
+      name: z.literal("inspect_analysis_view"),
+      arguments: toolContract("inspect_analysis_view").inputSchema,
+    })
+    .parse(limits.continuation);
+  expect(call.arguments.source).toEqual({
+    kind: "retained-evidence",
+    evidence_id: parent.evidence_id,
+  });
+  const first = await client.callTool(call);
+  expect(first.isError).not.toBe(true);
+  const page = toolContract("inspect_analysis_view").outputSchema.parse(
+    first.structuredContent,
+  ).normalized_result;
+  expect(page).toMatchObject({
+    parent_evidence_id: parent.evidence_id,
+    item: { text: pseudocode.slice(0, 64) },
+    coverage: { examined: 64, next_offset: 64, exhausted: false },
+  });
+  expect(Buffer.byteLength(JSON.stringify(first))).toBeLessThan(
+    STDIO_DEFAULT_MAX_BUFFER_SIZE,
+  );
+  const second = await client.callTool({
+    name: call.name,
+    arguments: {
+      ...call.arguments,
+      view: {
+        kind: "native",
+        facet: "pseudocode",
+        offset: page.coverage.next_offset,
+        limit: 64,
+      },
+    },
+  });
+  expect(second.isError).not.toBe(true);
+  expect(
+    toolContract("inspect_analysis_view").outputSchema.parse(
+      second.structuredContent,
+    ).normalized_result,
+  ).toMatchObject({ item: { text: pseudocode.slice(64, 128) } });
+  expect(
+    session.evidenceById(parent.evidence_id)?.normalized_result,
+  ).toMatchObject({ pseudocode });
+  await client.ping();
+  expect(calls).toEqual(["analyze_function"]);
+});
+
 it("returns a JavaScript summary without graph payloads from a retained reference", async () => {
   const { client, session } = await connect();
   const parent = analysisViewJavaScriptEvidence();
@@ -532,4 +746,88 @@ it("accepts a transport-constraint retained reference as the view source", async
       path: "renderer.js",
     },
   ]);
+});
+
+it("projects an actual HAR capture retained by the public MCP workflow", async () => {
+  const root = await createTestTempDirectory("rea-surface-mcp-");
+  const path = join(root, "surface.har");
+  await writeFile(path, JSON.stringify(apiSurfaceHar()));
+  const service = new WebNetworkCaptureService({
+    inspect: async (input) => {
+      const bytes = await readFile(input.capture_path);
+      return ok({
+        ...decodeHarCapture(bytes.toString("utf8"), input.sensitive_values),
+        artifact: {
+          path: input.capture_path,
+          sha256: createHash("sha256").update(bytes).digest("hex"),
+          bytes: bytes.length,
+        },
+        format: "har",
+        runtime_attribution: "unknown",
+        limitations: [],
+      });
+    },
+  });
+  const { client } = await connect(undefined, service);
+  const captureResponse = await client.callTool({
+    name: "inspect_web_network_capture",
+    arguments: { capture_path: path, format: "har" },
+  });
+  expect(captureResponse.isError).not.toBe(true);
+  const parent = parseEvidence(captureResponse.structuredContent);
+  const response = await client.callTool({
+    name: "inspect_analysis_view",
+    arguments: {
+      source: { kind: "retained-evidence", evidence_id: parent.evidence_id },
+      view: { kind: "api-surface" },
+    },
+  });
+  expect(response.isError).not.toBe(true);
+  const evidence = parseEvidence(response.structuredContent);
+  expect(evidence.confidence).toBe("inferred");
+  expect(evidence.normalized_result).toMatchObject({
+    records: { examined: 13, total: 13, excluded: 0 },
+    coverage: { total: 12, exhausted: true },
+    groups: expect.arrayContaining([
+      expect.objectContaining({
+        path_template: "/users/{numeric}",
+        record_ordinals: [0, 1],
+      }),
+    ]),
+  });
+});
+
+it("reproduces the published API surface example from decoded fixture bytes", async () => {
+  const fixture = apiSurfaceHar();
+  fixture.log.entries = fixture.log.entries.slice(0, 2);
+  const bytes = Buffer.from(JSON.stringify(fixture));
+  const service = new WebNetworkCaptureService({
+    inspect: async () =>
+      ok({
+        ...decodeHarCapture(bytes.toString("utf8"), []),
+        artifact: {
+          path: "/fixtures/api-surface.har",
+          sha256: createHash("sha256").update(bytes).digest("hex"),
+          bytes: bytes.length,
+        },
+        format: "har",
+        runtime_attribution: "unknown",
+        limitations: [],
+      }),
+  });
+  const { client } = await connect(undefined, service);
+  const capture = await client.callTool({
+    name: "inspect_web_network_capture",
+    arguments: { capture_path: "/fixtures/api-surface.har", format: "har" },
+  });
+  expect(parseEvidence(capture.structuredContent).evidence_id).toBe(
+    API_SURFACE_EXAMPLE.input.source.evidence_id,
+  );
+  const response = await client.callTool({
+    name: "inspect_analysis_view",
+    arguments: API_SURFACE_EXAMPLE.input,
+  });
+  expect(parseEvidence(response.structuredContent).normalized_result).toEqual(
+    API_SURFACE_EXAMPLE.output,
+  );
 });

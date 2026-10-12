@@ -12,6 +12,7 @@ export const registrationSchema = z
     startup_timeout_sec: z.number().positive().optional(),
     type: z.string().optional(),
     transport: z.string().optional(),
+    serverName: z.string().optional(),
     tools: z.array(z.string()).optional(),
     disabled: z.boolean().optional(),
     enabled: z.boolean().optional(),

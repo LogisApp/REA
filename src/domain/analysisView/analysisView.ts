@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { javaScriptSourceSelectionSchema } from "../javascript/javascriptSourceSelection.js";
 
 import {
   AnalysisInputError,
@@ -20,7 +21,13 @@ import {
 import { analysisInputErrorFromIssues } from "../inputIssueProjection.js";
 import { projectBinaryLayoutView } from "./binaryLayoutView.js";
 import { projectJavaScriptApplicationView } from "./javascriptApplicationView.js";
+import {
+  projectWebNetworkApiSurfaceView,
+  apiSurfaceFields,
+  apiSurfaceViewSchema,
+} from "./webNetworkApiSurfaceView.js";
 import { projectNativeFunctionView } from "./nativeFunctionView.js";
+import type { WebNetworkApiSurfaceAccumulator } from "./WebNetworkApiSurfaceAccumulator.js";
 
 /** Public name of the selected-view workflow. */
 export const INSPECT_ANALYSIS_VIEW_OPERATION = "inspect_analysis_view" as const;
@@ -30,44 +37,42 @@ const facetViewSchema = z.strictObject({
   kind: z.literal("facet"),
   facet: z.enum(["mitigations", "linkage"]),
 });
-const itemSelectorSchema = z.union([
-  z.strictObject({ index: z.number().int().nonnegative() }),
-  z.strictObject({ name: z.string() }),
-  z.strictObject({
-    path: z
-      .string()
-      .describe(
-        "Exact observed module path or original source-map reference from a module page; an empty reference is valid.",
-      ),
-  }),
-  z.strictObject({ node_id: prefixedDigestSchema("jag_node") }),
+const indexSelectorSchema = z.strictObject({
+  index: z.number().int().nonnegative(),
+});
+const nameSelectorSchema = z.strictObject({ name: z.string() });
+const pathSelectorSchema = z.strictObject({
+  path: z
+    .string()
+    .describe(
+      "Exact observed module path or original source-map reference from a module page; an empty reference is valid.",
+    ),
+});
+const nodeIdSelectorSchema = z.strictObject({
+  node_id: prefixedDigestSchema("jag_node"),
+});
+const moduleItemViewSchema = z.strictObject({
+  kind: z.literal("item"),
+  collection: z.literal("modules"),
+  selector: z.union([pathSelectorSchema, nodeIdSelectorSchema]),
+});
+const sectionOrSymbolItemViewSchema = z.strictObject({
+  kind: z.literal("item"),
+  collection: z.enum(["sections", "symbols"]),
+  selector: z.union([indexSelectorSchema, nameSelectorSchema]),
+});
+/**
+ * The collection-specific selector alternatives are expressed in the owning
+ * contract so the advertised JSON Schema preserves them: modules accept
+ * path/node_id, sections and symbols accept index/name. Refinement-only
+ * constraints do not survive JSON Schema conversion, so the advertised
+ * schema previously accepted combinations that runtime input validation
+ * rejects.
+ */
+const itemViewSchema = z.discriminatedUnion("collection", [
+  moduleItemViewSchema,
+  sectionOrSymbolItemViewSchema,
 ]);
-const itemViewSchema = z
-  .strictObject({
-    kind: z.literal("item"),
-    collection: z.enum(["sections", "symbols", "modules"]),
-    selector: itemSelectorSchema,
-  })
-  .superRefine((value, context) => {
-    const selector = value.selector;
-    if (value.collection === "modules") {
-      if (!("path" in selector) && !("node_id" in selector))
-        context.addIssue({
-          code: "custom",
-          path: ["selector"],
-          message:
-            "Module items are selected by exact path or node_id, not index or name.",
-        });
-      return;
-    }
-    if (!("index" in selector) && !("name" in selector))
-      context.addIssue({
-        code: "custom",
-        path: ["selector"],
-        message:
-          "Section and symbol items are selected by index or exact name, not path or node_id.",
-      });
-  });
 const pageViewSchema = z.strictObject({
   kind: z.literal("page"),
   collection: z.enum(["sections", "symbols", "modules"]),
@@ -110,9 +115,17 @@ export const analysisViewRequestSchema = z.discriminatedUnion("kind", [
   itemViewSchema,
   pageViewSchema,
   nativeViewSchema,
+  apiSurfaceViewSchema,
 ]);
 
-/** Inline Evidence or an exact same-session retained reference. */
+// The application owns admission and authenticated Evidence parsing. SDK and
+// CLI envelope parsing must borrow this unknown value rather than clone it
+// before admission. Advertise the owning Evidence contract in both dialects.
+const inlineEvidenceInputSchema = z.unknown().nonoptional();
+inlineEvidenceInputSchema._zod.processJSONSchema =
+  evidenceSchema._zod.processJSONSchema;
+
+/** Unauthenticated inline input or an exact same-session retained reference. */
 export const analysisViewSourceSchema = z.discriminatedUnion("kind", [
   z.strictObject({
     kind: z.literal("retained-evidence"),
@@ -120,7 +133,7 @@ export const analysisViewSourceSchema = z.discriminatedUnion("kind", [
   }),
   z.strictObject({
     kind: z.literal("inline"),
-    evidence: evidenceSchema,
+    evidence: inlineEvidenceInputSchema,
   }),
 ]);
 
@@ -172,10 +185,37 @@ const javascriptSummarySchema = z.strictObject({
   input_path: z.string().min(1),
   format: z.enum(["asar", "directory"]),
   root_artifact_sha256: digestSchema,
+  source_selection: javaScriptSourceSelectionSchema.exactOptional(),
   statistics: jsonObjectSchema,
   electron: jsonObjectSchema,
   coverage: jsonObjectSchema,
   limitation_count: z.number().int().nonnegative(),
+});
+
+const summaryViewResultFields = {
+  kind: z.literal("summary"),
+  view: summaryViewSchema,
+  parent_evidence_id: prefixedDigestSchema("ev"),
+  parent_digest: digestSchema,
+  view_digest: digestSchema,
+  artifact: artifactSchema,
+  coverage: coverageSchema,
+  limitations: z.array(z.string()),
+  unknowns: z.array(z.string()),
+} as const;
+
+/** Summary `inspect_binary_layout` detail returns; no other view kind. */
+export const binaryLayoutSummaryViewResultSchema = z.strictObject({
+  ...summaryViewResultFields,
+  summary: layoutSummarySchema,
+  parent_operation: z.literal("inspect_binary_layout"),
+});
+
+/** Summary `analyze_javascript_application` detail returns; no other view kind. */
+export const javascriptApplicationSummaryViewResultSchema = z.strictObject({
+  ...summaryViewResultFields,
+  summary: javascriptSummarySchema,
+  parent_operation: z.literal("analyze_javascript_application"),
 });
 
 const viewResultBase = {
@@ -195,6 +235,17 @@ const viewResultBase = {
 
 /** Projected facts for one selected view of retained analysis Evidence. */
 export const analysisViewResultSchema = z.discriminatedUnion("kind", [
+  z.strictObject({
+    ...viewResultBase,
+    ...apiSurfaceFields,
+    kind: z.literal("api-surface"),
+    parent_operation: z.literal("inspect_web_network_capture"),
+    view: apiSurfaceViewSchema,
+    artifact: z.strictObject({
+      path: z.string(),
+      sha256: digestSchema.nullable(),
+    }),
+  }),
   z.strictObject({
     kind: z.literal("summary"),
     view: summaryViewSchema,
@@ -242,6 +293,8 @@ export interface AnalysisViewParent {
   readonly normalizedResult: unknown;
   readonly limitations: readonly string[];
   readonly artifact?: { readonly path: string; readonly sha256: string } | null;
+  /** Parent Evidence parameters, when the parent operation records them. */
+  readonly parameters?: unknown;
 }
 
 /** Construct a typed input failure for one selected-view constraint. */
@@ -252,6 +305,10 @@ export const analysisViewInputError = (
 
 /** View payload before the content digest is attached. */
 export type UnsignedAnalysisView =
+  | Omit<
+      Extract<AnalysisViewResult, { readonly kind: "api-surface" }>,
+      "view_digest"
+    >
   | Omit<
       Extract<AnalysisViewResult, { readonly kind: "summary" }>,
       "view_digest"
@@ -335,6 +392,7 @@ const parentArtifactPath = (parent: AnalysisViewParent): string => {
 export const projectAnalysisView = (
   parent: AnalysisViewParent,
   view: AnalysisViewRequest,
+  apiSurfaceAccumulator?: WebNetworkApiSurfaceAccumulator,
 ): Result<AnalysisViewResult, AnalysisError> => {
   const digest = parentDigest(parent.evidenceId);
   if (!digestSchema.safeParse(digest).success)
@@ -347,6 +405,17 @@ export const projectAnalysisView = (
         },
       ]),
     );
+  if (
+    view.kind === "api-surface" ||
+    parent.operation === "inspect_web_network_capture"
+  ) {
+    const projected = projectWebNetworkApiSurfaceView(
+      parent,
+      view,
+      apiSurfaceAccumulator,
+    );
+    return projected.ok ? ok(sealAnalysisView(projected.value)) : projected;
+  }
   if (parent.operation === "inspect_binary_layout") {
     const layout = binaryLayoutSchema.safeParse(parent.normalizedResult);
     if (!layout.success)

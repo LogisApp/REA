@@ -15,6 +15,54 @@ const MARKER = "REA_TEST_RESOLVED ";
 // must not resolve them just to register the complete command catalog.
 const DEFERRED_IMPORTS = [
   {
+    name: "direct-analysis",
+    path: "/dist/application/DirectAnalysis.js",
+  },
+  {
+    name: "direct-analysis-status",
+    path: "/dist/application/DirectAnalysisStatus.js",
+  },
+  {
+    name: "doctor",
+    path: "/dist/application/Doctor.js",
+  },
+  {
+    name: "doctor-runtime",
+    path: "/dist/doctorRuntime.js",
+  },
+  {
+    name: "setup",
+    path: "/dist/application/Setup.js",
+  },
+  {
+    name: "setup-host",
+    path: "/dist/application/SetupHost.js",
+  },
+  {
+    name: "uninstall",
+    path: "/dist/application/Uninstall.js",
+  },
+  {
+    name: "update",
+    path: "/dist/application/Update.js",
+  },
+  {
+    name: "update-runtime",
+    path: "/dist/application/UpdateRuntime.js",
+  },
+  {
+    name: "catalog-identity",
+    path: "/dist/catalogIdentity.js",
+  },
+  {
+    name: "server-identity",
+    path: "/dist/serverIdentity.js",
+  },
+  {
+    name: "tool-contracts",
+    path: "/dist/contracts/toolContracts.js",
+  },
+  {
     name: "playwright-core",
     path: "/node_modules/playwright-core/",
   },
@@ -26,6 +74,46 @@ const DEFERRED_IMPORTS = [
     name: "binary-composition",
     path: "/dist/composition/binary.js",
   },
+  {
+    name: "javascript-application",
+    path: "/dist/application/javascript/JavaScriptApplicationService.js",
+  },
+  {
+    name: "javascript-workflows",
+    path: "/dist/application/javascript/JavaScriptApplicationWorkflowService.js",
+  },
+  {
+    name: "javascript-semantic-trace",
+    path: "/dist/application/javascript/JavaScriptSemanticTraceService.js",
+  },
+  {
+    name: "electron-observation",
+    path: "/dist/application/javascript/ElectronObservationService.js",
+  },
+  {
+    name: "electron-active-observation",
+    path: "/dist/application/javascript/ElectronActiveObservationService.js",
+  },
+  {
+    name: "javascript-runtime-reconciliation",
+    path: "/dist/application/javascript/JavaScriptRuntimeReconciliationService.js",
+  },
+  {
+    name: "android-application",
+    path: "/dist/application/android/AndroidApplicationService.js",
+  },
+  {
+    name: "apple-application",
+    path: "/dist/application/apple/AppleApplicationService.js",
+  },
+  {
+    name: "reconstruction-coverage",
+    path: "/dist/application/ReconstructionCoverageService.js",
+  },
+  {
+    name: "reconstruction-obligation-ledger",
+    path: "/dist/application/ReconstructionObligationLedgerService.js",
+  },
 ] as const;
 // Report each resolved deferred package on stderr without changing resolution.
 const RESOLUTION_HOOK = `data:text/javascript,${encodeURIComponent(`
@@ -35,7 +123,9 @@ registerHooks({
   resolve(specifier, context, next) {
     const resolved = next(specifier, context);
     const name = imports.find((item) =>
-      resolved.url.includes(item.path),
+      resolved.url.includes(item.path) ||
+      (item.path.startsWith("/dist/") && item.path.endsWith(".js") &&
+       resolved.url.includes("/dist/cli-runtime/" + item.path.slice(6, -3).split("/").join("__") + "-")),
     );
     if (name !== undefined)
       process.stderr.write(${JSON.stringify(MARKER)} + name.name + "\\n");
@@ -126,17 +216,21 @@ describe("CLI startup imports", () => {
         source,
         "--json",
       ]),
-    ).resolves.toEqual(new Set());
+    ).resolves.toEqual(new Set(["javascript-application"]));
   });
 
   it("loads native provider composition when a provider operation is called", async () => {
-    await expect(
-      resolvedPackages(
-        evaluate(
-          'const { createDirectAnalysis } = await import("./dist/composition/directAnalysis.js"); await createDirectAnalysis({}).runSessionStatus();',
-        ),
+    const resolved = await resolvedPackages(
+      evaluate(
+        'const { createDirectAnalysis } = await import("./dist/composition/directAnalysis.js"); await createDirectAnalysis({}).runSessionStatus();',
       ),
-    ).resolves.toContain("binary-composition");
+    );
+    expect(resolved).toContain("binary-composition");
+    expect(resolved).not.toContain("direct-analysis");
+    expect(resolved).toContain("direct-analysis-status");
+    expect(resolved).toContain("server-identity");
+    expect(resolved).toContain("catalog-identity");
+    expect(resolved).toContain("tool-contracts");
   });
 });
 

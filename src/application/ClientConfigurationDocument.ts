@@ -5,6 +5,13 @@ import {
   stringify as stringifyYaml,
 } from "yaml";
 import { isDeepStrictEqual } from "node:util";
+
+import {
+  parseDshCordisDocument,
+  serializeDshDocument,
+  editDshDocument,
+  dshClientRegistrationEntry,
+} from "./DshCordisPatch.js";
 import {
   applyEdits,
   findNodeAtLocation,
@@ -20,6 +27,7 @@ import { MCP_STARTUP_POLICY } from "../mcpStartupPolicy.js";
 import { PRODUCT_IDENTITY } from "../identity.js";
 import { registrationFieldAccepted } from "./ClientRegistrationShape.js";
 import type { SetupClient } from "./SupportedClients.js";
+import { compareUnicodeCodePoints } from "../domain/unicodeCodePointOrder.js";
 
 export type ClientConfigurationFormat = NonNullable<SetupClient["format"]>;
 export type ClientServersKey = "mcp_servers" | "mcpServers" | "mcp" | "servers";
@@ -65,7 +73,7 @@ const normalizeConfigurationValue = (value: unknown): unknown => {
     return value;
   return Object.fromEntries(
     Object.entries(value)
-      .sort(([left], [right]) => left.localeCompare(right))
+      .sort(([left], [right]) => compareUnicodeCodePoints(left, right))
       .map(([key, nested]) => [key, normalizeConfigurationValue(nested)]),
   );
 };
@@ -105,11 +113,11 @@ const parseDocument = (
   // comments, trailing commas, a BOM, or an empty existing file must be
   // rejected instead of registering into a document Pi cannot load.
   if (format === "pi") return objectSchema.parse(JSON.parse(text));
-  // Hermes stores MCP servers in `mcp_servers` inside a YAML document.
-  if (format === "hermes") return objectSchema.parse(parseYaml(text));
   // An empty file, which some clients create before any server is added,
   // holds no settings to preserve.
   if (isEmptyClientConfigurationText(text)) return {};
+  // Hermes stores MCP servers in `mcp_servers` inside a YAML document.
+  if (format === "hermes") return objectSchema.parse(parseYaml(text));
   const errors: ParseError[] = [];
   // Accept a UTF-8 BOM without shifting diagnostics or editing the original text.
   const jsonText = text.startsWith("\uFEFF") ? ` ${text.slice(1)}` : text;
@@ -132,6 +140,8 @@ export const parseClientConfiguration = (
 ): ClientConfigurationDocument => {
   if (format === undefined || format === "unsupported")
     throw new TypeError("client does not have a supported MCP config format");
+  // DeepSeek Harness stores a Cordis patch list, not a server table.
+  if (format === "dsh") return parseDshCordisDocument(text);
   const document = parseDocument(text, format);
   const serversKey = clientConfigurationServersKey(format);
   const value = document[serversKey];
@@ -185,6 +195,14 @@ export const withClientServers = (
   servers: Record<string, unknown>,
   removeLegacy?: string,
 ): Record<string, unknown> => {
+  // The Harness patch list upserts or removes by entry id, not by table.
+  if (parsed.dialect === "dsh")
+    return Object.hasOwn(servers, PRODUCT_IDENTITY.mcpServerKey)
+      ? editDshDocument(
+          parsed,
+          objectSchema.parse(servers[PRODUCT_IDENTITY.mcpServerKey]),
+        )
+      : editDshDocument(parsed);
   const [key = "", nested] = parsed.serversPath;
   if (nested === undefined) return { ...parsed.document, [key]: servers };
   const outer = { ...objectSchema.parse(parsed.document[key]) };
@@ -1281,6 +1299,7 @@ export const serializeClientConfiguration = (
     return serializeGrokConfiguration(document, originalText);
   if (format === "hermes")
     return serializeHermesConfiguration(document, originalText);
+  if (format === "dsh") return serializeDshDocument(document);
   // An empty original holds no comments or settings to preserve. Writing a
   // fresh document also keeps a lone BOM from shifting past the closing brace.
   if (
@@ -1344,7 +1363,8 @@ const serializeHermesConfiguration = (
   if (entry === undefined)
     yamlDocument.deleteIn([serversKey, PRODUCT_IDENTITY.mcpServerKey]);
   else yamlDocument.setIn([serversKey, PRODUCT_IDENTITY.mcpServerKey], entry);
-  return yamlDocument.toString();
+  // Editing REA must not reflow unrelated user prompts or other YAML scalars.
+  return yamlDocument.toString({ lineWidth: 0 });
 };
 
 /** Build the stdio entry shape expected by one client's configuration dialect. */
@@ -1398,6 +1418,8 @@ export const clientRegistrationEntry = (
         args,
         ...(Object.keys(environment).length === 0 ? {} : { env: environment }),
       };
+    case "dsh":
+      return dshClientRegistrationEntry(command, environment);
     case "hermes":
       // Hermes reads stdio servers from `mcp_servers.<name>` and connects them
       // unless `enabled` is false, so the entry states it explicitly.

@@ -6,11 +6,17 @@ const [
   runId,
   shutdownMode = "acknowledge",
   diagnosticMode = "quiet",
+  healthMode = "ready",
 ] = process.argv.slice(2);
 let diagnosticOutputEmitted = false;
 const heldReplies = new Map();
+const sockets = new Set();
 if (process.send !== undefined)
   process.on("message", (message) => {
+    if (message?.disconnect === true) {
+      for (const socket of sockets) socket.destroy();
+      return;
+    }
     const reply = heldReplies.get(message?.release);
     if (reply === undefined) return;
     heldReplies.delete(message.release);
@@ -172,6 +178,8 @@ const sendEchoWithProgress = (send, request) => {
 };
 
 const server = createServer((socket) => {
+  sockets.add(socket);
+  socket.once("close", () => sockets.delete(socket));
   socket.on("error", () => undefined);
   socket.setEncoding("utf8");
   let buffer = "";
@@ -201,17 +209,21 @@ const server = createServer((socket) => {
         send({ id: request.id, error: { code: -32001, message: "bad token" } });
       } else if (request.method === "health") {
         emitDiagnosticOutput();
-        send(
-          {
-            id: request.id,
-            result: {
-              name: "REA Hopper bridge",
-              version: "1.0.0",
-              run_id: runId,
+        const reply = () =>
+          send(
+            {
+              id: request.id,
+              result: {
+                name: "REA Hopper bridge",
+                version: "1.0.0",
+                run_id: runId,
+              },
             },
-          },
-          true,
-        );
+            true,
+          );
+        if (healthMode === "gated") heldReplies.set(request.id, reply);
+        else if (healthMode === "ready") reply();
+        else throw new Error(`Unknown health fixture mode: ${healthMode}`);
       } else if (
         request.method === "shutdown" ||
         request.method === "shutdown_document"

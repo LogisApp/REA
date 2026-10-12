@@ -1,4 +1,5 @@
 import type { EvidenceMcpServer } from "./EvidenceMcpServer.js";
+import type { ArtifactResourceScope } from "../artifacts/ArtifactResourceScope.js";
 
 import {
   getNavigationContext,
@@ -12,6 +13,7 @@ import { ProcessCaptureResourceScope } from "../process/capture/ProcessCaptureLi
 import { ProcessCaptureError } from "../process/capture/ProcessCaptureError.js";
 import { toolContract } from "../contracts/toolContracts.js";
 import type { AnalysisSnapshot } from "../domain/analysisSnapshot.js";
+import { binaryTargetSummary } from "../application/binary/BinaryTargetSummary.js";
 import { UnknownRegistryError } from "../domain/unknownRegistryError.js";
 import type { AnalysisError } from "../domain/analysisErrorBase.js";
 import type { Evidence } from "../domain/evidence.js";
@@ -191,7 +193,10 @@ const registerOpenLifecycleTool = ({
     async (input, context) => {
       let snapshot: AnalysisSnapshot | undefined;
       if (input.snapshot_path !== undefined) {
-        const loaded = await readAnalysisSnapshot(input.snapshot_path);
+        const loaded = await readAnalysisSnapshot(
+          input.snapshot_path,
+          context.mcpReq.signal,
+        );
         if (!loaded.ok)
           return server.delivery.toCallToolResult(loaded, openContract);
         snapshot = loaded.value;
@@ -200,6 +205,12 @@ const registerOpenLifecycleTool = ({
         session.open(input.path, {
           signal: context.mcpReq.signal,
           ...(input.format === undefined ? {} : { formatHint: input.format }),
+          ...(input.architecture === undefined
+            ? {}
+            : { architecture: input.architecture }),
+          ...(input.entry_point === undefined
+            ? {}
+            : { entryPoint: input.entry_point }),
           ...(input.provider_id === undefined
             ? {}
             : { providerId: input.provider_id }),
@@ -210,13 +221,7 @@ const registerOpenLifecycleTool = ({
         ? server.delivery.toCallToolResult(
             {
               ok: true,
-              value: {
-                path: opened.value.path,
-                format: opened.value.format,
-                kind: opened.value.kind,
-                sha256: opened.value.sha256,
-                architecture: opened.value.architecture ?? null,
-              },
+              value: binaryTargetSummary(opened.value),
             },
             openContract,
           )
@@ -227,6 +232,7 @@ const registerOpenLifecycleTool = ({
 
 /** Register MCP-only target lifecycle operations on a long-lived session. */
 export interface SessionToolOptions {
+  readonly artifactResources: ArtifactResourceScope;
   readonly startedAt?: string;
   readonly availabilityPolicy?: () => AvailabilityPolicy;
   readonly androidAnalysisAvailability?: (
@@ -282,7 +288,7 @@ export const registerSessionTools = (
   server: EvidenceMcpServer,
   session: BinarySessionPort,
   logger: Logger,
-  options: SessionToolOptions = {},
+  options: SessionToolOptions,
 ): void => {
   const openContract = toolContract("open_binary");
   const closeContract = toolContract("close_binary");
@@ -335,6 +341,7 @@ export const registerSessionTools = (
   registerEvidenceTools({
     server,
     session,
+    resources: options.artifactResources,
     exportContract,
     importContract,
     snapshotContract,

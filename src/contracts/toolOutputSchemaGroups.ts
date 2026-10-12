@@ -1,6 +1,10 @@
 import { z } from "zod";
 import { evidenceBundleSummarySchema } from "../domain/evidenceRecordSummary.js";
 import { BINARY_ARCHITECTURES } from "../domain/binaryTargetTypes.js";
+import {
+  binaryArchitectureSchema,
+  rawBinaryEntryPointSchema,
+} from "../domain/rawBinary.js";
 import { nativeFunctionAnnotationsSchema } from "../domain/native/nativeFunctionAnnotations.js";
 import { nativeLoadImageSchema } from "../domain/native/nativeLoadImage.js";
 import { nativeUiResultSchema } from "../domain/native/nativeUiObservation.js";
@@ -55,6 +59,7 @@ import { callPathResultSchema } from "../domain/callPathSchemas.js";
 import { staticRuntimeCorrelationResultSchema } from "../domain/staticRuntimeCorrelation.js";
 import { reconstructionVerificationResultSchema } from "../domain/reconstructionVerificationSchemas.js";
 import { analysisErrorProjectionSchema } from "./errorSchemas.js";
+import { relationshipCoverageSchema } from "../domain/relationshipCoverage.js";
 import { nativeDispatchMetadataResultSchema } from "../domain/native/objcSwiftMetadata.js";
 import { nativeInvestigationTraceSchema } from "../domain/native/nativeInvestigationGraph.js";
 import {
@@ -236,6 +241,7 @@ const callPathTraceOutput = evidenceResultOf(
         error: analysisErrorProjectionSchema,
       }),
     ),
+    relationship_coverage: z.record(z.string(), relationshipCoverageSchema),
     traversal: z.object({
       nodes_visited: z.number().int().min(1),
     }),
@@ -298,7 +304,12 @@ export const enhancedOutputSchemas: Readonly<Record<string, z.ZodObject>> = {
       failed: z.number().int().min(0),
     }),
   ),
-  get_call_graph: evidenceResultOf(z.record(z.string(), z.array(graphNode))),
+  get_call_graph: evidenceResultOf(
+    z.strictObject({
+      graph: z.record(z.string(), z.array(graphNode)),
+      limitations: z.array(z.string()),
+    }),
+  ),
   analyze_swift_types: evidenceResultOf(
     z.object({
       total: z.number().int().min(0),
@@ -409,16 +420,33 @@ export const managedWorkflowOutputSchemas: Readonly<
   ),
 };
 
+const lifecycleTargetFields = {
+  path: z.string(),
+  kind: targetKindSchema,
+  sha256: z.string().regex(/^[a-f0-9]{64}$/u),
+  architecture: z.enum(BINARY_ARCHITECTURES).nullable(),
+};
+const detectedLifecycleTargetSchema = z.object({
+  ...lifecycleTargetFields,
+  format: targetFormatSchema.exclude(["raw-binary"]),
+});
+const rawLifecycleTargetSchema = z.object({
+  ...lifecycleTargetFields,
+  format: z.literal("raw-binary"),
+  kind: z.literal("executable"),
+  architecture: binaryArchitectureSchema,
+  entry_point: rawBinaryEntryPointSchema.describe(
+    "Canonical caller-selected address where raw file offset 0 is mapped and execution is seeded.",
+  ),
+});
+
 /** Exact structured-content schemas for target lifecycle operations. */
 export const sessionOutputSchemas = {
   open_binary: lifecycleResultOf(
-    z.object({
-      path: z.string(),
-      format: targetFormatSchema,
-      kind: targetKindSchema,
-      sha256: z.string().regex(/^[a-f0-9]{64}$/u),
-      architecture: z.enum(BINARY_ARCHITECTURES).nullable(),
-    }),
+    z.discriminatedUnion("format", [
+      detectedLifecycleTargetSchema,
+      rawLifecycleTargetSchema,
+    ]),
   ),
   close_binary: lifecycleResultOf(
     z.union([
@@ -448,19 +476,15 @@ export const sessionOutputSchemas = {
   ),
   binary_session: lifecycleResultOf(
     z.union([
-      z.union([
-        sessionProvider.extend({
-          open: z.literal(false),
-        }),
-        sessionProvider.extend({
-          open: z.literal(true),
-          path: z.string(),
-          format: targetFormatSchema,
-          kind: targetKindSchema,
-          sha256: z.string().regex(/^[a-f0-9]{64}$/u),
-          architecture: z.enum(BINARY_ARCHITECTURES).nullable(),
-        }),
-      ]),
+      sessionProvider.extend({ open: z.literal(false) }),
+      sessionProvider.extend({
+        open: z.literal(true),
+        ...detectedLifecycleTargetSchema.shape,
+      }),
+      sessionProvider.extend({
+        open: z.literal(true),
+        ...rawLifecycleTargetSchema.shape,
+      }),
     ]),
   ),
   export_evidence_bundle: lifecycleResultOf(

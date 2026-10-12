@@ -19,13 +19,30 @@ interface ToolSchemas {
 }
 
 function schemaErrors(tools: readonly ToolSchemas[]): string[] {
-  const ajv = new Ajv2020({ strict: false, validateFormats: false });
+  // Reuse Ajv's meta-schema validators, then clear each root's reference
+  // namespace, including nested IDs, before validating the next schema.
+  const ajv = new Ajv2020({
+    strict: false,
+    validateFormats: false,
+    addUsedSchema: false,
+  });
   return tools.flatMap((tool) =>
     ["inputSchema", "outputSchema"].flatMap((kind) => {
       const schema =
         kind === "inputSchema" ? tool.inputSchema : tool.outputSchema;
-      if (schema === undefined || ajv.validateSchema(schema)) return [];
-      return [`${tool.name}.${kind}: ${ajv.errorsText(ajv.errors)}`];
+      if (schema === undefined) return [];
+      try {
+        if (!ajv.validateSchema(schema))
+          return [`${tool.name}.${kind}: ${ajv.errorsText(ajv.errors)}`];
+        ajv.compile(schema);
+        return [];
+      } catch (cause: unknown) {
+        return [
+          `${tool.name}.${kind}: ${cause instanceof Error ? cause.message : String(cause)}`,
+        ];
+      } finally {
+        ajv.removeSchema();
+      }
     }),
   );
 }
@@ -73,7 +90,7 @@ function expectKnownAuthorityHints(tools: readonly ToolSchemas[]): void {
     },
     annotate_native_function: {
       readOnlyHint: false,
-      destructiveHint: false,
+      destructiveHint: true,
       idempotentHint: true,
       openWorldHint: true,
     },
@@ -102,7 +119,21 @@ function expectKnownAuthorityHints(tools: readonly ToolSchemas[]): void {
       openWorldHint: false,
     },
     capture_process_scenario: {
+      readOnlyHint: false,
+      destructiveHint: true,
       openWorldHint: true,
+    },
+    observe_native_calls: {
+      readOnlyHint: false,
+      destructiveHint: true,
+    },
+    uninstall_adb_package: {
+      readOnlyHint: false,
+      destructiveHint: true,
+    },
+    start_adb_app: {
+      readOnlyHint: false,
+      destructiveHint: true,
     },
     export_evidence_bundle: {
       readOnlyHint: false,
@@ -460,6 +491,95 @@ it(
   advertiseAndEnforceProcessEnvironmentKeyConstraint,
 );
 
+const advertiseAndEnforceItemSelectorCollectionConstraints =
+  async (): Promise<void> => {
+    const contract = TOOL_CONTRACTS.find(
+      ({ name }) => name === "inspect_analysis_view",
+    );
+    if (contract === undefined)
+      throw new Error("inspect_analysis_view contract was not registered");
+
+    const server = new McpServer({
+      name: "item-selector-schema",
+      version: "0",
+    });
+    server.registerTool(
+      contract.name,
+      toolRegistrationOptions(contract),
+      async () => ({
+        content: [],
+      }),
+    );
+    const client = new Client({ name: "item-selector-schema", version: "0" });
+    const [clientTransport, serverTransport] =
+      InMemoryTransport.createLinkedPair();
+    try {
+      await server.connect(serverTransport);
+      await client.connect(clientTransport);
+      const advertised = (await client.listTools()).tools.find(
+        ({ name }) => name === contract.name,
+      );
+      if (advertised === undefined)
+        throw new Error("inspect_analysis_view tool was not advertised");
+
+      const validate = new Ajv2020({
+        strict: false,
+        validateFormats: false,
+      }).compile(advertised.inputSchema);
+      const source = {
+        kind: "retained-evidence",
+        evidence_id: `ev_${"a".repeat(64)}`,
+      };
+      const itemInput = (collection: string, selector: unknown) => ({
+        source,
+        view: { kind: "item", collection, selector },
+      });
+      const nodeId = `jag_node_${"b".repeat(64)}`;
+      // Collection-specific selector constraints must survive JSON Schema
+      // conversion: the advertised schema rejects exactly what runtime
+      // input validation rejects.
+      const invalid: ReadonlyArray<readonly [string, unknown]> = [
+        ["modules", { index: 0 }],
+        ["modules", { name: "entry" }],
+        ["sections", { path: "/src/entry.js" }],
+        ["symbols", { node_id: nodeId }],
+      ];
+      const valid: ReadonlyArray<readonly [string, unknown]> = [
+        ["modules", { path: "/src/entry.js" }],
+        ["modules", { node_id: nodeId }],
+        ["sections", { index: 0 }],
+        ["sections", { name: ".text" }],
+        ["symbols", { index: 0 }],
+        ["symbols", { name: "main" }],
+      ];
+      for (const [collection, selector] of invalid) {
+        const input = itemInput(collection, selector);
+        const label = `${collection}/${Object.keys(selector as object)[0]}`;
+        expect(contract.inputSchema.safeParse(input).success, label).toBe(
+          false,
+        );
+        expect(validate(input), `advertised schema rejects ${label}`).toBe(
+          false,
+        );
+      }
+      for (const [collection, selector] of valid) {
+        const input = itemInput(collection, selector);
+        const label = `${collection}/${Object.keys(selector as object)[0]}`;
+        expect(contract.inputSchema.safeParse(input).success, label).toBe(true);
+        expect(validate(input), `advertised schema accepts ${label}`).toBe(
+          true,
+        );
+      }
+    } finally {
+      await Promise.allSettled([client.close(), server.close()]);
+    }
+  };
+
+it(
+  "advertises and enforces the item selector collection constraints",
+  advertiseAndEnforceItemSelectorCollectionConstraints,
+);
+
 describe("MCP process input JSON Schema", () => {
   it("advertises process strings without weakening terminal input", async () => {
     const server = new McpServer({
@@ -524,6 +644,69 @@ it("ships nonrecursive input and output schemas in the generated catalog", () =>
   expect(schemaErrors(GENERATED_MCP_TOOL_CATALOG)).toEqual([]);
   expect(recursiveReferences(GENERATED_MCP_TOOL_CATALOG)).toEqual([]);
 });
+
+it("rejects unresolved output-schema references even for uncalled tools", () => {
+  const errors = schemaErrors([
+    {
+      name: "dangling",
+      inputSchema: { type: "object" },
+      outputSchema: { $ref: "#/$defs/missing" },
+    },
+  ]);
+  expect(errors).toHaveLength(1);
+  expect(errors[0]).toContain("dangling.outputSchema");
+});
+
+it("validates each tool independently when output schema IDs repeat", () => {
+  const outputSchema = { $id: "urn:rea:test:shared-output", type: "string" };
+  const errors = schemaErrors([
+    { name: "first", inputSchema: { type: "object" }, outputSchema },
+    {
+      name: "second",
+      inputSchema: { type: "object" },
+      outputSchema: { ...outputSchema },
+    },
+    {
+      name: "broken",
+      inputSchema: { type: "object" },
+      outputSchema: { $id: outputSchema.$id, $ref: "#/$defs/missing" },
+    },
+  ]);
+  expect(errors).toHaveLength(1);
+  expect(errors[0]).toContain("broken.outputSchema");
+  expect(errors[0]).toContain("missing");
+});
+
+it.each([false, true])(
+  "rejects references to another tool's nested IDs (earlier compilation fails: %s)",
+  (invalidPrevious) => {
+    const nestedId = "urn:rea:test:nested-output";
+    const errors = schemaErrors([
+      {
+        name: "first",
+        inputSchema: { type: "object" },
+        outputSchema: {
+          $defs: { shared: { $id: nestedId, type: "string" } },
+          ...(invalidPrevious ? { pattern: "[" } : {}),
+        },
+      },
+      {
+        name: "broken",
+        inputSchema: { type: "object" },
+        outputSchema: {
+          $ref: nestedId,
+          $defs: { shared: { type: "number" } },
+        },
+      },
+    ]);
+    expect(errors).toHaveLength(invalidPrevious ? 2 : 1);
+    const brokenErrors = errors.filter((error) =>
+      error.startsWith("broken.outputSchema:"),
+    );
+    expect(brokenErrors).toHaveLength(1);
+    expect(brokenErrors[0]).toContain(nestedId);
+  },
+);
 
 it("distinguishes recursive references from shared definitions", () => {
   const diamond = {
