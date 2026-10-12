@@ -12,12 +12,23 @@ import type {
 import { AnalysisCancelledError } from "../domain/analysisErrorCore.js";
 import {
   debugCompanionMatches,
+  machoCommandSpan,
   readMachoUuidEntries,
   type MachOUuidEntry,
 } from "../domain/machoDebugCompanion.js";
 
 /** Bound on the bytes read to walk Mach-O headers and load commands. */
 const HEADER_READ_LIMIT = 64 * 1024;
+
+/** A real dSYM bundle carries one DWARF member per architecture; more is noise. */
+const MEMBER_COUNT_LIMIT = 16;
+
+/**
+ * Member size admitted for hashing and staging. Real members scale with their
+ * executable; one gibibyte covers shipped-app dSYMs while bounding private
+ * runtime disk use before any copy starts.
+ */
+const MEMBER_SIZE_LIMIT_BYTES = 1024 * 1024 * 1024;
 
 const DSYM_DWARF_DIRECTORY = join("Contents", "Resources", "DWARF");
 
@@ -50,14 +61,28 @@ const throwIfCancelled = (signal: AbortSignal | undefined): void => {
     throw new AnalysisCancelledError("resolve_binary_target");
 };
 
-const readUuidWindow = async (
+/**
+ * Read a Mach-O image region sized by its declared load-command span rather
+ * than a fixed ceiling: probe the header window, then extend to the declared
+ * span when it exceeds the probe (bounded by the region and a format-derived
+ * limit the span validator enforces).
+ */
+const readUuidRegion = async (
   handle: FileHandle,
   offset: number,
   length: number,
 ): Promise<Result<Buffer, string>> => {
-  const window = Buffer.alloc(Math.min(length, HEADER_READ_LIMIT));
-  const observed = await handle.read(window, 0, window.length, offset);
-  return ok(window.subarray(0, observed.bytesRead));
+  const probeLength = Math.min(length, HEADER_READ_LIMIT);
+  const probe = Buffer.alloc(probeLength);
+  const observed = await handle.read(probe, 0, probe.length, offset);
+  const probed = probe.subarray(0, observed.bytesRead);
+  const span = machoCommandSpan(probed);
+  if (!span.ok) return ok(probed);
+  const needed = span.value.start + span.value.size;
+  if (needed <= probed.length || needed > length) return ok(probed);
+  const full = Buffer.alloc(needed);
+  const reread = await handle.read(full, 0, full.length, offset);
+  return ok(full.subarray(0, reread.bytesRead));
 };
 
 /**
@@ -68,31 +93,50 @@ export const readMachoFileUuidEntries = async (
   handle: FileHandle,
   fileSize: number,
 ): Promise<Result<MachOUuidEntry[], string>> => {
-  const prefix = await readUuidWindow(handle, 0, fileSize);
+  const prefix = await readUuidRegion(handle, 0, fileSize);
   if (!prefix.ok) return prefix;
   const magic = prefix.value.length >= 4 ? prefix.value.readUInt32BE(0) : 0;
-  if (magic !== 0xcafebabe && magic !== 0xcafebabf)
-    return readMachoUuidEntries(prefix.value);
-  const wide = magic === 0xcafebabf;
+  const universal =
+    magic === 0xcafebabe ||
+    magic === 0xcafebabf ||
+    magic === 0xbebafeca ||
+    magic === 0xbebafbfa;
+  if (!universal) return readMachoUuidEntries(prefix.value);
+  const wide = magic === 0xcafebabf || magic === 0xbebafbfa;
+  // The architecture table follows the observed container byte order.
+  const big = magic === 0xcafebabe || magic === 0xcafebabf;
+  const read32 = big
+    ? (position: number) => prefix.value.readUInt32BE(position)
+    : (position: number) => prefix.value.readUInt32LE(position);
   if (prefix.value.length < 8)
     return err("the universal Mach-O container header is truncated");
-  const count = prefix.value.readUInt32BE(4);
+  const count = read32(4);
   const entrySize = wide ? 32 : 20;
   if (count > 128 || 8 + count * entrySize > prefix.value.length)
     return err("the universal Mach-O container table is truncated");
   const entries: MachOUuidEntry[] = [];
   for (let index = 0; index < count; index += 1) {
     const entry = 8 + index * entrySize;
-    const cpuType = prefix.value.readInt32BE(entry);
+    const cpuType = big
+      ? prefix.value.readInt32BE(entry)
+      : prefix.value.readInt32LE(entry);
     const sliceOffset = wide
-      ? Number(prefix.value.readBigUInt64BE(entry + 8))
-      : prefix.value.readUInt32BE(entry + 8);
+      ? Number(
+          big
+            ? prefix.value.readBigUInt64BE(entry + 8)
+            : prefix.value.readBigUInt64LE(entry + 8),
+        )
+      : read32(entry + 8);
     const sliceSize = wide
-      ? Number(prefix.value.readBigUInt64BE(entry + 16))
-      : prefix.value.readUInt32BE(entry + 12);
+      ? Number(
+          big
+            ? prefix.value.readBigUInt64BE(entry + 16)
+            : prefix.value.readBigUInt64LE(entry + 16),
+        )
+      : read32(entry + 12);
     if (sliceOffset > fileSize || sliceSize > fileSize - sliceOffset)
       return err("a universal Mach-O slice is out of file bounds");
-    const slice = await readUuidWindow(handle, sliceOffset, sliceSize);
+    const slice = await readUuidRegion(handle, sliceOffset, sliceSize);
     if (!slice.ok) return slice;
     const read = readMachoUuidEntries(slice.value);
     if (!read.ok) return read;
@@ -183,6 +227,10 @@ export const admitDebugCompanion = async (input: {
     return err({
       reason: `dsym_path contains no DWARF member file: ${dsymPath}`,
     });
+  if (memberPaths.length > MEMBER_COUNT_LIMIT)
+    return err({
+      reason: `dsym_path contains ${String(memberPaths.length)} DWARF member files; at most ${String(MEMBER_COUNT_LIMIT)} are supported`,
+    });
   const targetEntries = await readMachoFileUuidEntries(
     input.targetHandle,
     input.targetSize,
@@ -205,6 +253,10 @@ export const admitDebugCompanion = async (input: {
     try {
       const initial = await memberHandle.stat();
       if (!initial.isFile()) continue;
+      if (initial.size > MEMBER_SIZE_LIMIT_BYTES)
+        return err({
+          reason: `dsym DWARF member exceeds the supported size: ${memberPath}`,
+        });
       const memberEntries = await readMachoFileUuidEntries(
         memberHandle,
         initial.size,

@@ -126,6 +126,57 @@ describe("UUID entry attribution", () => {
       [0x01000007, "22222222-2222-2222-2222-222222222222"],
     ]);
   });
+  it("decodes a byte-swapped little-endian universal container", () => {
+    // FAT_CIGAM: the magic reads 0xbebafeca big-endian; table fields are LE.
+    const container = universalWithSlices([
+      withUuidLoadCommand("33333333-3333-3333-3333-333333333333"),
+    ]);
+    const swapped = Buffer.from(container);
+    swapped.writeUInt32LE(0xcafebabe, 0);
+    swapped.writeUInt32LE(1, 4);
+    const entry = 8;
+    swapped.writeUInt32LE(swapped.readUInt32BE(entry + 8), entry + 8 - 0);
+    // rewrite the first arch entry fields little-endian
+    const offsetBE = container.readUInt32BE(entry + 8);
+    const sizeBE = container.readUInt32BE(entry + 12);
+    swapped.writeUInt32LE(0x01000007, entry);
+    swapped.writeUInt32LE(offsetBE, entry + 8);
+    swapped.writeUInt32LE(sizeBE, entry + 12);
+    swapped.writeUInt32LE(12, entry + 16);
+    expect(readMachoUuidEntries(swapped)).toEqual({
+      ok: true,
+      value: [
+        { cpuType: 0x01000007, uuid: "33333333-3333-3333-3333-333333333333" },
+      ],
+    });
+  });
+  it("reads a UUID declared beyond a 64 KiB load-command span", () => {
+    const fillerSize = 8 + 8; // one LC_SOURCE_VERSION-shaped filler command
+    const commandCount = Math.ceil((80 * 1024) / fillerSize) + 1;
+    const commandSize = 8 + 16;
+    const bytes = Buffer.alloc(
+      32 + (commandCount - 1) * fillerSize + commandSize,
+    );
+    bytes.writeUInt32LE(0xfeedfacf, 0);
+    bytes.writeUInt32LE(0x0100000c, 4);
+    bytes.writeUInt32LE(2, 12);
+    bytes.writeUInt32LE(commandCount, 16);
+    bytes.writeUInt32LE(bytes.length - 32, 20);
+    let cursor = 32;
+    for (let index = 0; index < commandCount - 1; index += 1) {
+      bytes.writeUInt32LE(0x29, cursor); // LC_SOURCE_VERSION
+      bytes.writeUInt32LE(fillerSize, cursor + 4);
+      cursor += fillerSize;
+    }
+    bytes.writeUInt32LE(0x1b, cursor); // LC_UUID
+    bytes.writeUInt32LE(commandSize, cursor + 4);
+    uuidBytes("DEADBEEF-1234-5678-9ABC-DEF012345678").copy(bytes, cursor + 8);
+    expect(bytes.length).toBeGreaterThan(64 * 1024);
+    expect(readMachoUuids(bytes)).toEqual({
+      ok: true,
+      value: ["DEADBEEF-1234-5678-9ABC-DEF012345678"],
+    });
+  });
   it("decodes a big-endian thin image with big-endian load commands", () => {
     const commandSize = 8 + 16;
     const bytes = Buffer.alloc(32 + commandSize);

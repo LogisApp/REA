@@ -3,6 +3,8 @@ import { err, ok, type Result } from "./result.js";
 const LC_UUID = 0x1b;
 const FAT_MAGIC_BE = 0xcafebabe;
 const FAT_MAGIC_64_BE = 0xcafebabf;
+const FAT_MAGIC_LE = 0xbebafeca;
+const FAT_MAGIC_64_LE = 0xbebafbfa;
 const THIN_LITTLE_MAGICS = new Set([0xcefaedfe, 0xcffaedfe]);
 const THIN_BIG_MAGICS = new Set([0xfeedface, 0xfeedfacf]);
 const UUID_BYTES = 16;
@@ -22,6 +24,32 @@ const formatUuid = (raw: Buffer): string => {
     hex.slice(16, 20),
     hex.slice(20, 32),
   ].join("-");
+};
+
+/**
+ * The declared load-command span of a thin Mach-O image, with its byte
+ * order, so a reader can fetch exactly the bytes the parser walks instead of
+ * imposing an arbitrary window ceiling.
+ */
+export const machoCommandSpan = (
+  bytes: Buffer,
+): Result<
+  { readonly start: number; readonly size: number; readonly little: boolean },
+  string
+> => {
+  if (bytes.length < 32) return err("Mach-O header is truncated");
+  const magic = bytes.readUInt32BE(0);
+  const little = THIN_LITTLE_MAGICS.has(magic);
+  if (!little && !THIN_BIG_MAGICS.has(magic)) return err("not a Mach-O image");
+  const read32 = little
+    ? (position: number) => bytes.readUInt32LE(position)
+    : (position: number) => bytes.readUInt32BE(position);
+  const wide = magic === 0xfeedfacf || magic === 0xcffaedfe;
+  const start = wide ? 32 : 28;
+  const size = read32(20);
+  if (size < start || size > 0x8000000)
+    return err("Mach-O declared load-command span is invalid");
+  return ok({ start, size, little });
 };
 
 const readUuidsFromThin = (
@@ -77,9 +105,19 @@ export const readMachoUuidEntries = (
 ): Result<MachOUuidEntry[], string> => {
   if (bytes.length < 8) return err("Mach-O image is truncated");
   const magic = bytes.readUInt32BE(0);
-  if (magic === FAT_MAGIC_BE || magic === FAT_MAGIC_64_BE) {
-    const wide = magic === FAT_MAGIC_64_BE;
-    const count = bytes.readUInt32BE(4);
+  const fat =
+    magic === FAT_MAGIC_BE ||
+    magic === FAT_MAGIC_64_BE ||
+    magic === FAT_MAGIC_LE ||
+    magic === FAT_MAGIC_64_LE;
+  if (fat) {
+    const wide = magic === FAT_MAGIC_64_BE || magic === FAT_MAGIC_64_LE;
+    // The architecture table's byte order follows the observed magic.
+    const read32 =
+      magic === FAT_MAGIC_BE || magic === FAT_MAGIC_64_BE
+        ? (position: number) => bytes.readUInt32BE(position)
+        : (position: number) => bytes.readUInt32LE(position);
+    const count = read32(4);
     const entrySize = wide ? 32 : 20;
     if (count > 128 || 8 + count * entrySize > bytes.length)
       return err(
@@ -88,13 +126,22 @@ export const readMachoUuidEntries = (
     const entries: MachOUuidEntry[] = [];
     for (let index = 0; index < count; index += 1) {
       const entry = 8 + index * entrySize;
-      const cpuType = bytes.readInt32BE(entry);
+      const big = magic === FAT_MAGIC_BE || magic === FAT_MAGIC_64_BE;
+      const cpuType = big ? bytes.readInt32BE(entry) : bytes.readInt32LE(entry);
       const sliceOffset = wide
-        ? Number(bytes.readBigUInt64BE(entry + 8))
-        : bytes.readUInt32BE(entry + 8);
+        ? Number(
+            big
+              ? bytes.readBigUInt64BE(entry + 8)
+              : bytes.readBigUInt64LE(entry + 8),
+          )
+        : read32(entry + 8);
       const sliceSize = wide
-        ? Number(bytes.readBigUInt64BE(entry + 16))
-        : bytes.readUInt32BE(entry + 12);
+        ? Number(
+            big
+              ? bytes.readBigUInt64BE(entry + 16)
+              : bytes.readBigUInt64LE(entry + 16),
+          )
+        : read32(entry + 12);
       if (sliceSize === 0) return err("universal Mach-O slice is empty");
       if (sliceOffset > bytes.length || sliceSize > bytes.length - sliceOffset)
         return err("universal Mach-O slice is out of bounds");

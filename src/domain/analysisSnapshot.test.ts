@@ -119,6 +119,43 @@ describe("analysis snapshot target identity", () => {
     );
   });
 
+  it("hashes a bare target exactly like snapshots written before companions", () => {
+    const base = {
+      sha256: ANALYSIS_SNAPSHOT_TARGET.sha256,
+      kind: "executable",
+      architecture: "arm64",
+      format: "mach-o",
+    } as const;
+    // A legacy file has no debug_companion key; parsing a bare target adds
+    // null. Both must hash identically so legacy query IDs keep validating.
+    const legacyShape = {
+      ...base,
+    } as unknown as Parameters<typeof analysisQueryId>[0];
+    const binding = snapshotBinding(ANALYSIS_SNAPSHOT_PROFILE);
+    const parsedShape = analysisSnapshotSchema.parse({
+      target: legacyShape,
+      binding,
+      entries: [],
+      workflow_entries: [],
+      evidence_bundle: createEvidenceBundle([]),
+    });
+    expect(parsedShape.target.debug_companion).toBeNull();
+    expect(
+      analysisQueryId(parsedShape.target, binding, "list_procedures", {}),
+    ).toBe(analysisQueryId(legacyShape, binding, "list_procedures", {}));
+    // A present companion changes the identifier.
+    const withCompanion = {
+      ...legacyShape,
+      debug_companion: {
+        uuid: "A1B2C3D4-E5F6-0789-ABCD-EF0123456789",
+        member_sha256: "a".repeat(64),
+      },
+    };
+    expect(
+      analysisQueryId(withCompanion, binding, "list_procedures", {}),
+    ).not.toBe(analysisQueryId(legacyShape, binding, "list_procedures", {}));
+  });
+
   it("partitions session and snapshot identity by the selected dSYM", () => {
     const base: BinaryTarget = {
       path: "/fixture/pair",

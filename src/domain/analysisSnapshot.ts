@@ -530,6 +530,17 @@ const evidenceMatchesEntry = (
     evidenceContentDigest(evidence),
   ]) === entryEvidenceKey(entry, snapshot.binding);
 
+/**
+ * The target shape hashed into query IDs. A null companion is stripped so a
+ * bare target hashes exactly like the snapshots written before companion
+ * admission; a present companion keeps its key.
+ */
+const queryIdTarget = (target: AnalysisSnapshotTarget): JsonValue => {
+  if (target.debug_companion != null) return target;
+  const { debug_companion: _stripped, ...legacy } = target;
+  return legacy;
+};
+
 /** Compute the stable lookup key for one provider/profile-specific query. */
 export const analysisQueryId = (
   target: AnalysisSnapshotTarget,
@@ -538,7 +549,14 @@ export const analysisQueryId = (
   parameters: Readonly<Record<string, JsonValue>>,
 ): string =>
   `query_${createHash("sha256")
-    .update(canonicalJson({ target, binding, operation, parameters }))
+    .update(
+      canonicalJson({
+        target: queryIdTarget(target),
+        binding,
+        operation,
+        parameters,
+      }),
+    )
     .digest("hex")}`;
 
 /** Create one serializable snapshot entry from a successful provider call. */

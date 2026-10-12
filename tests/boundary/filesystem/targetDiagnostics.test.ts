@@ -465,6 +465,68 @@ describe("debug companion fixture admission", () => {
   );
 
   it.skipIf(!onDarwin)(
+    "rejects a DWARF directory with too many member files",
+    async () => {
+      const directory = await createTestTempDirectory("rea-dsym-count-");
+      const binary = await compilePairFixture(directory, "pair");
+      const dwarfDirectory = join(
+        `${binary}.dSYM`,
+        "Contents",
+        "Resources",
+        "DWARF",
+      );
+      for (let index = 0; index < 16; index += 1)
+        await writeFile(
+          join(dwarfDirectory, `extra-${String(index)}`),
+          Buffer.alloc(16),
+        );
+      const result = await parseBinaryTarget(binary, {
+        dsymPath: `${binary}.dSYM`,
+      });
+      if (result.ok) throw new Error("oversized member count was admitted");
+      const projected = projectAnalysisError(result.error);
+      expect(projected).toMatchObject({
+        code: "invalid_request",
+        details: {
+          constraint: "debug_companion_rejected",
+          reason: expect.stringContaining("at most 16 are supported"),
+        },
+      });
+    },
+  );
+
+  it.skipIf(!onDarwin)(
+    "rejects an oversized DWARF member before hashing or staging it",
+    async () => {
+      const directory = await createTestTempDirectory("rea-dsym-size-");
+      const binary = await compilePairFixture(directory, "pair");
+      const dwarfDirectory = join(
+        `${binary}.dSYM`,
+        "Contents",
+        "Resources",
+        "DWARF",
+      );
+      const huge = join(dwarfDirectory, "huge");
+      await writeFile(huge, Buffer.alloc(64));
+      // A sparse file reports a size beyond the budget without occupying it.
+      const truncate = (await import("node:fs/promises")).truncate;
+      await truncate(huge, 1024 * 1024 * 1024 + 1);
+      const result = await parseBinaryTarget(binary, {
+        dsymPath: `${binary}.dSYM`,
+      });
+      if (result.ok) throw new Error("oversized member was admitted");
+      const projected = projectAnalysisError(result.error);
+      expect(projected).toMatchObject({
+        code: "invalid_request",
+        details: {
+          constraint: "debug_companion_rejected",
+          reason: expect.stringContaining("exceeds the supported size"),
+        },
+      });
+    },
+  );
+
+  it.skipIf(!onDarwin)(
     "rejects a mismatched dSYM as caller input with the UUID reason",
     async () => {
       const directory = await createTestTempDirectory("rea-dsym-mismatch-");
