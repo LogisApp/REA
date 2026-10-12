@@ -1126,8 +1126,10 @@ describe("package import alias refusals", () => {
     });
     expect(outcome.limitations.join(" ")).toContain("explicit null");
   });
+});
 
-  it("leaves wildcard import aliases unresolved", () => {
+describe("package import alias patterns", () => {
+  it("resolves wildcard import aliases through pattern keys", () => {
     const files = aliasFiles({
       "package.json": JSON.stringify({
         imports: { "#internal/*": "./src/*.js" },
@@ -1143,10 +1145,100 @@ describe("package import alias refusals", () => {
       files,
     });
     expect(outcome).toMatchObject({
+      resolution_status: "resolved",
+      resolved_path: "src/util.js",
+    });
+  });
+
+  it("prefers an exact alias over a matching pattern key", () => {
+    const files = aliasFiles({
+      "package.json": JSON.stringify({
+        imports: {
+          "#config": "./config.cjs",
+          "#c*": "./pattern.cjs",
+        },
+      }),
+      "main.js": "",
+      "config.cjs": "",
+      "pattern.cjs": "",
+    });
+    const outcome = resolve({
+      declaredPath: "#config",
+      sourcePath: "main.js",
+      context: "module-specifier",
+      moduleKind: "require",
+      files,
+    });
+    expect(outcome).toMatchObject({
+      resolution_status: "resolved",
+      resolved_path: "config.cjs",
+    });
+  });
+});
+
+describe("package import alias pattern refusals", () => {
+  it("keeps a literal star in an import specifier refused", () => {
+    const files = aliasFiles({
+      "package.json": JSON.stringify({
+        imports: { "#internal/*": "./src/*.js" },
+      }),
+      "main.js": "",
+      "src/util.js": "",
+    });
+    const outcome = resolve({
+      declaredPath: "#internal/*",
+      sourcePath: "main.js",
+      context: "module-specifier",
+      moduleKind: "import",
+      files,
+    });
+    expect(outcome).toMatchObject({
       resolution_status: "external",
       resolved_path: null,
     });
-    expect(outcome.limitations.join(" ")).toMatch(/wildcard/i);
+    expect(outcome.limitations.join(" ")).toContain("pattern itself");
+  });
+
+  it("names the expanded recursive target a pattern alias selects", () => {
+    const files = aliasFiles({
+      "package.json": JSON.stringify({
+        imports: { "#internal/*": "#other/*" },
+      }),
+      "main.js": "",
+    });
+    const outcome = resolve({
+      declaredPath: "#internal/db",
+      sourcePath: "main.js",
+      context: "module-specifier",
+      moduleKind: "import",
+      files,
+    });
+    expect(outcome).toMatchObject({
+      resolution_status: "external",
+      resolved_path: null,
+    });
+    expect(outcome.limitations.join(" ")).toContain("#other/db");
+  });
+
+  it("refuses an import pattern capture that escapes the package", () => {
+    const files = aliasFiles({
+      "package.json": JSON.stringify({
+        imports: { "#internal/*": "./*" },
+      }),
+      "main.js": "",
+    });
+    const outcome = resolve({
+      declaredPath: "#internal/../escape",
+      sourcePath: "main.js",
+      context: "module-specifier",
+      moduleKind: "import",
+      files,
+    });
+    expect(outcome).toMatchObject({
+      resolution_status: "rejected",
+      resolved_path: null,
+    });
+    expect(outcome.limitations.join(" ")).toContain("forbidden path segment");
   });
 
   it("leaves recursive and external-package import targets unresolved", () => {
@@ -1695,6 +1787,227 @@ describe("url-reference JavaScript artifact path resolution", () => {
     ).toMatchObject({
       resolution_status: "external",
       resolved_path: null,
+    });
+  });
+});
+
+describe("package exports pattern keys", () => {
+  it("substitutes a simple wildcard key into its target", () => {
+    const files = fileMap([
+      file("app/src/consumer.js", "root"),
+      file(
+        "app/node_modules/fixture/package.json",
+        "root",
+        JSON.stringify({ exports: { "./*": "./dist/*.js" } }),
+      ),
+      file("app/node_modules/fixture/dist/feature.js", "root"),
+    ]);
+    expect(
+      resolve({
+        declaredPath: "fixture/feature",
+        sourcePath: "app/src/consumer.js",
+        context: "module-specifier",
+        moduleKind: "require",
+        files,
+      }),
+    ).toMatchObject({
+      resolution_status: "resolved",
+      resolved_path: "app/node_modules/fixture/dist/feature.js",
+    });
+  });
+
+  it("prefers an exact key over a matching pattern key", () => {
+    const files = fileMap([
+      file("app/src/consumer.js", "root"),
+      file(
+        "app/node_modules/fixture/package.json",
+        "root",
+        JSON.stringify({
+          exports: { "./*": "./fallback/*", "./feature": "./exact.cjs" },
+        }),
+      ),
+      file("app/node_modules/fixture/exact.cjs", "root"),
+      file("app/node_modules/fixture/fallback/feature.cjs", "root"),
+    ]);
+    expect(
+      resolve({
+        declaredPath: "fixture/feature",
+        sourcePath: "app/src/consumer.js",
+        context: "module-specifier",
+        moduleKind: "require",
+        files,
+      }),
+    ).toMatchObject({
+      resolution_status: "resolved",
+      resolved_path: "app/node_modules/fixture/exact.cjs",
+    });
+  });
+
+  it("selects the pattern key with the longest prefix", () => {
+    const files = fileMap([
+      file("app/src/consumer.js", "root"),
+      file(
+        "app/node_modules/fixture/package.json",
+        "root",
+        JSON.stringify({
+          exports: {
+            "./*": "./fallback/*.cjs",
+            "./internal/*": "./src/*.cjs",
+          },
+        }),
+      ),
+      file("app/node_modules/fixture/fallback/internal/x.cjs", "root"),
+      file("app/node_modules/fixture/src/x.cjs", "root"),
+    ]);
+    expect(
+      resolve({
+        declaredPath: "fixture/internal/x",
+        sourcePath: "app/src/consumer.js",
+        context: "module-specifier",
+        moduleKind: "require",
+        files,
+      }),
+    ).toMatchObject({
+      resolution_status: "resolved",
+      resolved_path: "app/node_modules/fixture/src/x.cjs",
+    });
+  });
+
+  it("rewrites extensions through pattern suffixes", () => {
+    const files = fileMap([
+      file("app/src/consumer.js", "root"),
+      file(
+        "app/node_modules/fixture/package.json",
+        "root",
+        JSON.stringify({ exports: { "./*.js": "./src/*.ts" } }),
+      ),
+      file("app/node_modules/fixture/src/util.ts", "root"),
+    ]);
+    expect(
+      resolve({
+        declaredPath: "fixture/util.js",
+        sourcePath: "app/src/consumer.js",
+        context: "module-specifier",
+        moduleKind: "require",
+        files,
+      }),
+    ).toMatchObject({
+      resolution_status: "resolved",
+      resolved_path: "app/node_modules/fixture/src/util.ts",
+    });
+  });
+});
+
+describe("package exports pattern safety", () => {
+  it("selects conditions under pattern keys", () => {
+    const files = fileMap([
+      file("app/src/consumer.js", "root"),
+      file(
+        "app/node_modules/fixture/package.json",
+        "root",
+        JSON.stringify({
+          exports: {
+            "./x/*": { import: "./esm/*.mjs", require: "./cjs/*.cjs" },
+          },
+        }),
+      ),
+      file("app/node_modules/fixture/esm/a.mjs", "root"),
+      file("app/node_modules/fixture/cjs/a.cjs", "root"),
+    ]);
+    expect(
+      resolve({
+        declaredPath: "fixture/x/a",
+        sourcePath: "app/src/consumer.js",
+        context: "module-specifier",
+        moduleKind: "import",
+        files,
+      }),
+    ).toMatchObject({
+      resolution_status: "resolved",
+      resolved_path: "app/node_modules/fixture/esm/a.mjs",
+    });
+    expect(
+      resolve({
+        declaredPath: "fixture/x/a",
+        sourcePath: "app/src/consumer.js",
+        context: "module-specifier",
+        moduleKind: "require",
+        files,
+      }),
+    ).toMatchObject({
+      resolution_status: "resolved",
+      resolved_path: "app/node_modules/fixture/cjs/a.cjs",
+    });
+  });
+
+  it("refuses a pattern capture that escapes the package", () => {
+    const files = fileMap([
+      file("app/src/consumer.js", "root"),
+      file(
+        "app/node_modules/fixture/package.json",
+        "root",
+        JSON.stringify({ exports: { "./*": "./*" } }),
+      ),
+    ]);
+    expect(
+      resolve({
+        declaredPath: "fixture/../evil",
+        sourcePath: "app/src/consumer.js",
+        context: "module-specifier",
+        moduleKind: "require",
+        files,
+      }),
+    ).toMatchObject({
+      resolution_status: "rejected",
+      resolved_path: null,
+    });
+  });
+
+  it("refuses a pattern capture naming node_modules", () => {
+    const files = fileMap([
+      file("app/src/consumer.js", "root"),
+      file(
+        "app/node_modules/fixture/package.json",
+        "root",
+        JSON.stringify({ exports: { "./*": "./*" } }),
+      ),
+    ]);
+    expect(
+      resolve({
+        declaredPath: "fixture/node_modules/x",
+        sourcePath: "app/src/consumer.js",
+        context: "module-specifier",
+        moduleKind: "require",
+        files,
+      }),
+    ).toMatchObject({
+      resolution_status: "rejected",
+      resolved_path: null,
+    });
+  });
+
+  it("reports a missing expanded target without index fallback", () => {
+    const files = fileMap([
+      file("app/src/consumer.js", "root"),
+      file(
+        "app/node_modules/fixture/package.json",
+        "root",
+        JSON.stringify({ exports: { "./*": "./dist/*.js" } }),
+      ),
+      file("app/node_modules/fixture/dist/a/index.js", "root"),
+    ]);
+    expect(
+      resolve({
+        declaredPath: "fixture/a",
+        sourcePath: "app/src/consumer.js",
+        context: "module-specifier",
+        moduleKind: "require",
+        files,
+      }),
+    ).toMatchObject({
+      resolution_status: "not-found",
+      resolved_path: null,
+      limitations: [expect.stringContaining("exports targets are exact files")],
     });
   });
 });
