@@ -1,5 +1,6 @@
 import * as t from "@babel/types";
 import {
+  isSymbolicObject,
   symbolicTruth,
   type SymbolicValue,
 } from "./javascriptSymbolicValues.js";
@@ -21,16 +22,7 @@ export const symbolicLogicalRight = (
   if (operator === "??") {
     if (left.kind === "literal")
       return left.value === null || left.value === undefined;
-    return [
-      "function",
-      "object",
-      "namespace",
-      "array",
-      "record",
-      "loader",
-    ].includes(left.kind)
-      ? false
-      : undefined;
+    return isSymbolicObject(left) ? false : undefined;
   }
   const truth = symbolicTruth(left);
   return truth === undefined ? undefined : operator === "&&" ? truth : !truth;
