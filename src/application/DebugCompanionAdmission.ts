@@ -20,6 +20,13 @@ import {
 /** Bound on the bytes read to walk Mach-O headers and load commands. */
 const HEADER_READ_LIMIT = 64 * 1024;
 
+/**
+ * Resource budget for one image's declared load-command span. The span is
+ * walked only to locate LC_UUID; a binary declaring more than this is
+ * rejected with a typed reason instead of being allocated whole.
+ */
+const COMMAND_SPAN_LIMIT_BYTES = 16 * 1024 * 1024;
+
 /** A real dSYM bundle carries one DWARF member per architecture; more is noise. */
 const MEMBER_COUNT_LIMIT = 16;
 
@@ -79,6 +86,10 @@ const readUuidRegion = async (
   const span = machoCommandSpan(probed);
   if (!span.ok) return ok(probed);
   const needed = span.value.start + span.value.size;
+  if (needed > COMMAND_SPAN_LIMIT_BYTES)
+    return err(
+      "the Mach-O declared load-command span exceeds the supported budget",
+    );
   if (needed <= probed.length || needed > length) return ok(probed);
   const full = Buffer.alloc(needed);
   const reread = await handle.read(full, 0, full.length, offset);

@@ -147,6 +147,7 @@ describe("analysis snapshot target identity", () => {
     const withCompanion = {
       ...legacyShape,
       debug_companion: {
+        source_path: "/fixture/pair.dSYM",
         uuid: "A1B2C3D4-E5F6-0789-ABCD-EF0123456789",
         member_sha256: "a".repeat(64),
       },
@@ -171,6 +172,10 @@ describe("analysis snapshot target identity", () => {
       memberSha256: "a".repeat(64),
       uuid: "A1B2C3D4-E5F6-0789-ABCD-EF0123456789",
     };
+    // A byte-identical companion copied to another path is a different
+    // selection: the session must restage rather than report the old bundle.
+    const same = (a: unknown, b: unknown): boolean =>
+      JSON.stringify(a) === JSON.stringify(b);
     const withCompanion = { ...base, debugCompanion: companion };
     expect(snapshotMatchesTarget(snapshotTarget(base), base)).toBe(true);
     expect(
