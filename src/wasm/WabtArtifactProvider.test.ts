@@ -198,30 +198,27 @@ it.each([
 const outputLimitFailure = ({
   stdout = "(module",
   stderr = "",
-  observedStdoutBytes = Buffer.byteLength(stdout),
-  diagnosticTruncated = false,
   cleanupFailure = null,
 }: {
   readonly stdout?: string;
   readonly stderr?: string;
-  readonly observedStdoutBytes?: number;
-  readonly diagnosticTruncated?: boolean;
   readonly cleanupFailure?: string | null;
 } = {}) =>
   new OwnedCommandFailure(
     "output-limit",
     "Command diagnostic output exceeded its complete-output budget.",
     {
-      diagnosticTruncated,
+      diagnosticTruncated: true,
+      // Observed sizes differ from retained sizes, as after a real overflow.
       stdout: {
         text: stdout,
         bytes: Buffer.byteLength(stdout),
-        observedBytes: observedStdoutBytes,
+        observedBytes: Buffer.byteLength(stdout) + 1000,
       },
       stderr: {
         text: stderr,
         bytes: Buffer.byteLength(stderr),
-        observedBytes: Buffer.byteLength(stderr),
+        observedBytes: Buffer.byteLength(stderr) + 1000,
       },
       exitCode: null,
       signal: "SIGKILL",
@@ -249,11 +246,7 @@ it("reports WABT output beyond the budget as a resource constraint with a bounde
     (input) => {
       const version = input.arguments[0] === "--version";
       if (!version && input.command.includes("wasm2wat"))
-        throw outputLimitFailure({
-          stdout: "(module" + "a".repeat(5000),
-          observedStdoutBytes: WABT_LIMITS.outputBytes + 1,
-          diagnosticTruncated: true,
-        });
+        throw outputLimitFailure({ stdout: "(module" + "a".repeat(5000) });
       const script = version
         ? 'process.stdout.write("1.0.42\\n")'
         : input.command.includes("objdump")
@@ -292,11 +285,13 @@ it("reports WABT output beyond the budget as a resource constraint with a bounde
     stdout: "(module" + "a".repeat(4089),
     stderr: "",
     truncated: true,
-    stdout_bytes: WABT_LIMITS.outputBytes + 1,
+    stdout_bytes: 5007,
     stderr_bytes: 0,
+    exit_code: null,
+    signal: "SIGKILL",
   });
 });
-it("marks an excerpt cut from either stream as truncated", () => {
+it("bounds an oversized stderr to an excerpt", () => {
   expect(
     projectAnalysisError(
       wabtFailure(
@@ -311,6 +306,8 @@ it("marks an excerpt cut from either stream as truncated", () => {
     truncated: true,
     stdout_bytes: 7,
     stderr_bytes: 5000,
+    exit_code: null,
+    signal: "SIGKILL",
   });
 });
 it("cuts the excerpt on a code point boundary", () => {
@@ -337,6 +334,11 @@ it("bounds the excerpt when cleanup also fails after the output budget", () => {
     code: "cleanup_incomplete",
     details: {
       diagnostics: {
+        previous_error: {
+          failure_kind: "output-limit",
+          message: `WABT output exceeded the ${String(WABT_LIMITS.outputBytes)}-byte output budget`,
+          max_output_bytes: WABT_LIMITS.outputBytes,
+        },
         captured_output: { stdout: "(module", stderr: "w".repeat(4096) },
       },
     },

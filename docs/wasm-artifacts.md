@@ -57,8 +57,11 @@ paths, executable digests, exact banners and arguments. Executable digests are
 checked again after each command. Caller-supplied tools are trusted programs;
 version and digest recording are not publisher authentication or an OS sandbox.
 Each subprocess has a 30-second deadline and 32 MiB combined output budget.
-Output past the budget fails with `resource_constraint`. Its captured output
-keeps the first 4,096 bytes of each stream and each stream's observed size.
+Output past the budget fails with `resource_constraint`. Both streams share the
+budget, so a stream that starts after the other has filled it retains nothing.
+The captured output keeps up to the first 4,096 bytes that each stream retained,
+each stream's retained byte count, and the exit code and signal. Retained text
+can end in U+FFFD where the budget cut a multi-byte character.
 All commands use existing owned-process cancellation and cleanup. Workspace
 cleanup failures remain explicit errors with resource paths.
 

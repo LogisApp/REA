@@ -1,4 +1,6 @@
 import { ArtifactReaderFailure } from "../artifacts/ArtifactReader.js";
+import { boundedUtf8Text } from "../process/boundedUtf8Text.js";
+import type { ProviderProcessSnapshot } from "../process/ProviderProcess.js";
 import { AnalysisError } from "../domain/analysisErrorBase.js";
 import {
   AnalysisCancelledError,
@@ -12,31 +14,22 @@ import {
 } from "../domain/analysisErrorCore.js";
 import { ProviderCleanupError } from "../domain/providerCleanupError.js";
 import { OwnedCommandFailure } from "../process/OwnedCommand.js";
-import { boundedUtf8Text } from "../process/boundedUtf8Text.js";
-import type { ProviderProcessSnapshot } from "../process/ProviderProcess.js";
 import { WABT_LIMITS, WABT_PROVIDER_IDENTITY } from "./WabtRelease.js";
 const OUTPUT_LIMIT_EXCERPT_BYTES = 4096;
-/** Past the output budget, retained text is a prefix of an oversized stream; keep a bounded excerpt and the observed sizes. */
-const outputLimitExcerpt = (snapshot: ProviderProcessSnapshot) => {
-  const stdout = boundedUtf8Text(
-    snapshot.stdout.text,
-    OUTPUT_LIMIT_EXCERPT_BYTES,
-  );
-  const stderr = boundedUtf8Text(
-    snapshot.stderr.text,
-    OUTPUT_LIMIT_EXCERPT_BYTES,
-  );
-  return {
-    stdout: stdout.text,
-    stderr: stderr.text,
-    truncated:
-      snapshot.diagnosticTruncated === true ||
-      stdout.truncated ||
-      stderr.truncated,
-    stdout_bytes: snapshot.stdout.observedBytes,
-    stderr_bytes: snapshot.stderr.observedBytes,
-  };
-};
+const OUTPUT_LIMIT_REASON = `WABT output exceeded the ${String(WABT_LIMITS.outputBytes)}-byte output budget`;
+/** Past the output budget, retained text is a prefix of an oversized stream; keep a bounded excerpt of each. */
+const outputLimitExcerpt = (snapshot: ProviderProcessSnapshot) => ({
+  stdout: boundedUtf8Text(snapshot.stdout.text, OUTPUT_LIMIT_EXCERPT_BYTES)
+    .text,
+  stderr: boundedUtf8Text(snapshot.stderr.text, OUTPUT_LIMIT_EXCERPT_BYTES)
+    .text,
+  // The command reports output-limit only after retention was truncated.
+  truncated: true,
+  stdout_bytes: snapshot.stdout.bytes,
+  stderr_bytes: snapshot.stderr.bytes,
+  exit_code: snapshot.exitCode ?? null,
+  signal: snapshot.signal ?? null,
+});
 /** Preserve lifecycle failures and diagnostic bytes instead of returning partial success. */
 export const wabtFailure = (
   cause: unknown,
@@ -69,7 +62,14 @@ export const wabtFailure = (
         cause.resources,
         {
           reason: cause.cleanupFailure,
-          previous_error: reason,
+          previous_error:
+            cause.reason === "output-limit"
+              ? {
+                  failure_kind: "output-limit",
+                  message: OUTPUT_LIMIT_REASON,
+                  max_output_bytes: WABT_LIMITS.outputBytes,
+                }
+              : reason,
           ...(capturedOutput === undefined
             ? {}
             : { captured_output: capturedOutput }),
@@ -88,7 +88,7 @@ export const wabtFailure = (
       return new AnalysisResourceConstraintError(
         "inspect_wasm_artifact",
         "memory",
-        `WABT output exceeded the ${String(WABT_LIMITS.outputBytes)}-byte output budget`,
+        OUTPUT_LIMIT_REASON,
         { max_output_bytes: WABT_LIMITS.outputBytes },
         {
           ...options,
