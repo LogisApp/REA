@@ -29,6 +29,11 @@ interface ManagedPeFixtureOptions {
   readonly moduleRowCount?: number;
   readonly assemblyRowCount?: number;
   readonly memberRefParentRaw?: number;
+  readonly memberRefName?: string;
+  /** Raw MethodDefOrRef coded values, one MethodSpec row each. */
+  readonly methodSpecMethods?: readonly number[];
+  /** TypeSpec signature blobs, one TypeSpec row each. */
+  readonly typeSpecSignatures?: readonly Buffer[];
   readonly mvid?: Buffer;
   readonly pinvoke?: {
     readonly importName?: string;
@@ -524,6 +529,8 @@ interface FixtureMetadataRowContext {
     readonly methodSignature: number;
     readonly constructorSignature: number;
     readonly attributeBlob: number;
+    readonly typeSpecSignatures: readonly number[];
+    readonly methodSpecInstantiation: number;
   };
   readonly heapSizes: {
     readonly strings: MetadataIndexSize;
@@ -595,6 +602,37 @@ const exportedTypeTable = (
         ],
       ];
 
+const specTables = (
+  options: ManagedPeFixtureOptions,
+  indexes: FixtureMetadataRowContext["indexes"],
+  heapSizes: FixtureMetadataRowContext["heapSizes"],
+  widths: FixtureIndexWidths,
+): readonly (readonly [number, readonly Buffer[]])[] => [
+  ...(indexes.typeSpecSignatures.length === 0
+    ? []
+    : ([
+        [
+          27,
+          indexes.typeSpecSignatures.map((signature) =>
+            metadataIndex(signature, heapSizes.blobs),
+          ),
+        ],
+      ] as const)),
+  ...(options.methodSpecMethods === undefined
+    ? []
+    : ([
+        [
+          43,
+          options.methodSpecMethods.map((method) =>
+            Buffer.concat([
+              metadataIndex(method, widths.coded([6, 10], 1)),
+              metadataIndex(indexes.methodSpecInstantiation, heapSizes.blobs),
+            ]),
+          ),
+        ],
+      ] as const)),
+];
+
 const fixtureIndexWidths = ({
   options,
   referenceStringIndexes,
@@ -616,10 +654,12 @@ const fixtureIndexWidths = ({
     ],
     ...(indexes.pinvokeModuleName === null ? [] : ([[26, 1]] as const)),
     ...(indexes.pinvokeImportName === null ? [] : ([[28, 1]] as const)),
+    [27, indexes.typeSpecSignatures.length],
     [32, options.assemblyRowCount ?? 1],
     [35, referenceStringIndexes.length],
     [39, indexes.exportedTypes.length],
     [40, 1],
+    [43, options.methodSpecMethods?.length ?? 0],
   ]);
   const count = (table: number): number => rowCounts.get(table) ?? 0;
   const table = (index: number): MetadataIndexSize => indexSize(count(index));
@@ -780,6 +820,7 @@ const fixtureMetadataRows = ({
       ),
     ],
     ...exportedTypeTable(options, indexes, heapSizes, widths),
+    ...specTables(options, indexes, heapSizes, widths),
     [
       40,
       [
@@ -795,6 +836,24 @@ const fixtureMetadataRows = ({
   return rows;
 };
 
+/** Blob indexes for optional TypeSpec and MethodSpec rows; defaults leave the heap unchanged. */
+const specBlobIndexes = (
+  blobs: BlobHeap,
+  options: ManagedPeFixtureOptions,
+): Pick<
+  FixtureMetadataRowContext["indexes"],
+  "typeSpecSignatures" | "methodSpecInstantiation"
+> => ({
+  typeSpecSignatures: (options.typeSpecSignatures ?? []).map((signature) =>
+    blobs.add(signature),
+  ),
+  // GENERICINST with one string type argument.
+  methodSpecInstantiation:
+    options.methodSpecMethods === undefined
+      ? 0
+      : blobs.add(Buffer.from([0x0a, 0x01, 0x0e])),
+});
+
 const buildManagedFixtureMetadata = (
   options: ManagedPeFixtureOptions,
   methodRva: number,
@@ -805,7 +864,7 @@ const buildManagedFixtureMetadata = (
   const assemblyName = strings.add("Fixture.Managed");
   const attributeName = strings.add("TargetFrameworkAttribute");
   const attributeNamespace = strings.add("System.Runtime.Versioning");
-  const constructorName = strings.add(".ctor");
+  const constructorName = strings.add(options.memberRefName ?? ".ctor");
   const typeName = strings.add(options.typeName ?? "Program");
   const additionalTypeNames = Array.from(
     { length: options.additionalEmptyTypes ?? 0 },
@@ -841,6 +900,7 @@ const buildManagedFixtureMetadata = (
     options.methodSignature ?? Buffer.from([0x00, 0x00, 0x01]),
   );
   const constructorSignature = blobs.add(Buffer.from([0x20, 0x01, 0x01, 0x0e]));
+  const specBlobs = specBlobIndexes(blobs, options);
   const attributeBlob = blobs.add(
     fixedStringAttributeBlob(
       options.targetFramework === null
@@ -875,6 +935,7 @@ const buildManagedFixtureMetadata = (
       methodSignature,
       constructorSignature,
       attributeBlob,
+      ...specBlobs,
     },
     heapSizes: { strings: stringSize, blobs: blobSize, guids: guidSize },
   });

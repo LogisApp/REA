@@ -9,15 +9,13 @@ import type { ManagedParseIssue } from "../domain/managed/managedArtifact.js";
 import type { ManagedMetadataLayout } from "./ManagedMetadataLayout.js";
 import {
   signature,
-  type FieldCore,
   type ManagedCallEdge,
   type ManagedExportedType,
   type ManagedField,
   type ManagedFieldAccess,
   type ManagedMemberRef,
   type ManagedMethod,
-  type MemberRefCore,
-  type MethodCore,
+  type MemberCore,
   type TypeRange,
 } from "./ManagedMemberInspectorCore.js";
 import {
@@ -51,11 +49,11 @@ export const parseFields = (
   selected: SelectedTypeTokens = null,
 ): {
   readonly fields: readonly ManagedField[];
-  readonly core: ReadonlyMap<string, FieldCore>;
+  readonly core: ReadonlyMap<string, MemberCore>;
   readonly issues: readonly ManagedParseIssue[];
 } => {
   const fields: ManagedField[] = [];
-  const core = new Map<string, FieldCore>();
+  const core = new Map<string, MemberCore>();
   const issues: ManagedParseIssue[] = [];
   const table = layout.table(4);
   const ownerRow = readManagedValue(
@@ -78,7 +76,11 @@ export const parseFields = (
           : (readManagedValue(() => ownerRow(row), issues) ?? 0);
       const declared = ranges[owner - 1];
       const token = metadataToken(4, row);
-      core.set(token, { token, name });
+      core.set(token, {
+        token,
+        name,
+        declaringType: declared?.fullName ?? null,
+      });
       if (!isSelected(selected, declared)) return;
       const sig = readMetadataBlob(
         bytes,
@@ -174,13 +176,14 @@ export const parseExportedTypes = (
 export const parseMemberRefs = (
   bytes: Buffer,
   layout: ManagedMetadataLayout,
+  typeName: (token: string | null) => string | null,
 ): {
   readonly refs: readonly ManagedMemberRef[];
-  readonly core: ReadonlyMap<string, MemberRefCore>;
+  readonly core: ReadonlyMap<string, MemberCore>;
   readonly issues: readonly ManagedParseIssue[];
 } => {
   const refs: ManagedMemberRef[] = [];
-  const core = new Map<string, MemberRefCore>();
+  const core = new Map<string, MemberCore>();
   const issues: ManagedParseIssue[] = [];
   const table = layout.table(10);
   for (let row = 1; row <= (table?.rowCount ?? 0); row += 1) {
@@ -218,19 +221,22 @@ export const parseMemberRefs = (
               ? "MemberRef parent coded index 0x0 is null, but the Class column must reference a row"
               : `MemberRef parent coded index 0x${parentRaw.toString(16)} is invalid: ${parentReason}`,
         });
+      const parentToken = metadataCodedToken(
+        parentRaw,
+        3,
+        [2, 1, 26, 6, 27],
+        layout.rowCounts,
+      );
+      const parentName = typeName(parentToken);
       refs.push({
         token,
         row_offset: cursor.start,
-        parent_token: metadataCodedToken(
-          parentRaw,
-          3,
-          [2, 1, 26, 6, 27],
-          layout.rowCounts,
-        ),
+        parent_token: parentToken,
+        parent_name: parentName,
         name,
         signature: budgetedSignature(sig, layout),
       });
-      core.set(token, { token, name });
+      core.set(token, { token, name, declaringType: parentName });
     }, issues);
   }
   return { refs, core, issues };
@@ -252,11 +258,11 @@ export const parseMethods = ({
   selected = null,
 }: ParseMethodsInput): {
   readonly methods: readonly ManagedMethod[];
-  readonly core: ReadonlyMap<string, MethodCore>;
+  readonly core: ReadonlyMap<string, MemberCore>;
   readonly issues: readonly ManagedParseIssue[];
 } => {
   const methods: ManagedMethod[] = [];
-  const core = new Map<string, MethodCore>();
+  const core = new Map<string, MemberCore>();
   const issues: ManagedParseIssue[] = [];
   const table = layout.table(6);
   const ownerRow = readManagedValue(
@@ -317,6 +323,52 @@ export const parseMethods = ({
   return { methods, core, issues };
 };
 
+/**
+ * Index fields, member references, and methods by token, then name each
+ * MethodSpec an inspected body calls after the generic method it instantiates,
+ * so every edge target resolves through one lookup.
+ */
+export const edgeTargets = (
+  bytes: Buffer,
+  layout: ManagedMetadataLayout,
+  methods: readonly ManagedMethod[],
+  cores: readonly ReadonlyMap<string, MemberCore>[],
+): {
+  readonly members: ReadonlyMap<string, MemberCore>;
+  readonly issues: readonly ManagedParseIssue[];
+} => {
+  const members = new Map(cores.flatMap((core) => [...core]));
+  const issues: ManagedParseIssue[] = [];
+  for (const method of methods)
+    for (const { operand } of method.body.anchors) {
+      if (operand?.startsWith("0x2b") !== true || members.has(operand))
+        continue;
+      readManagedValue(() => {
+        const cursor = metadataRowCursor(
+          bytes,
+          layout,
+          0x2b,
+          Number.parseInt(operand.slice(4), 16),
+        );
+        const generic = metadataCodedToken(
+          cursor.readIndex(layout.codedIndexSize("MethodDefOrRef")),
+          1,
+          [6, 10],
+          layout.rowCounts,
+        );
+        const target = generic === null ? undefined : members.get(generic);
+        if (target !== undefined)
+          members.set(operand, { ...target, token: operand });
+      }, issues);
+    }
+  return { members, issues };
+};
+
+const TARGET_TABLES = new Map<string, ReadonlySet<string>>([
+  ["method", new Set(["0x06", "0x0a", "0x2b"])],
+  ["field", new Set(["0x04", "0x0a"])],
+]);
+
 const targetKind = (token: string): ManagedCallEdge["target_kind"] =>
   token.startsWith("0x06")
     ? "method-def"
@@ -328,9 +380,7 @@ const targetKind = (token: string): ManagedCallEdge["target_kind"] =>
 
 export const edges = (
   methods: readonly ManagedMethod[],
-  methodCore: ReadonlyMap<string, MethodCore>,
-  fieldCore: ReadonlyMap<string, FieldCore>,
-  refCore: ReadonlyMap<string, MemberRefCore>,
+  members: ReadonlyMap<string, MemberCore>,
   budget: ManagedDecodeBudget,
 ): {
   readonly callEdges: readonly ManagedCallEdge[];
@@ -350,11 +400,15 @@ export const edges = (
     const caller = derives ? callerName(method) : method.name;
     for (const anchor of method.body.anchors) {
       if (anchor.opcode === "ldtoken") continue;
-      if (anchor.operand_kind === "method" && anchor.operand !== null) {
-        const named =
-          methodCore.get(anchor.operand)?.name ??
-          refCore.get(anchor.operand)?.name ??
-          null;
+      const { operand } = anchor;
+      if (operand === null) continue;
+      // A token from a table the operand kind cannot name stays unnamed.
+      const target = TARGET_TABLES.get(anchor.operand_kind)?.has(
+        operand.slice(0, 4),
+      )
+        ? members.get(operand)
+        : undefined;
+      if (anchor.operand_kind === "method") {
         // Each derived record is admitted before the graph grows further.
         callEdges.push(
           admitManagedProjection(
@@ -362,23 +416,25 @@ export const edges = (
               caller_token: method.token,
               caller,
               opcode: anchor.opcode,
-              target_token: anchor.operand,
-              target_kind: targetKind(anchor.operand),
-              target_name: named,
+              target_token: operand,
+              target_kind: targetKind(operand),
+              target_name: target?.name ?? null,
+              target_declaring_type: target?.declaringType ?? null,
             },
             budget,
           ),
         );
       }
-      if (anchor.operand_kind === "field" && anchor.operand !== null) {
+      if (anchor.operand_kind === "field") {
         fieldAccesses.push(
           admitManagedProjection(
             {
               method_token: method.token,
               method: caller,
               opcode: anchor.opcode,
-              field_token: anchor.operand,
-              field_name: fieldCore.get(anchor.operand)?.name ?? null,
+              field_token: operand,
+              field_name: target?.name ?? null,
+              field_declaring_type: target?.declaringType ?? null,
             },
             budget,
           ),

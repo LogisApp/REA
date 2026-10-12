@@ -49,20 +49,14 @@ export interface TypeRange {
   readonly methodEnd: number;
 }
 
-export interface MethodCore {
+/**
+ * Name and declaring type of a field, method, member reference, or method
+ * specification, keyed by its token so edges resolve any target uniformly.
+ */
+export interface MemberCore {
   readonly token: string;
   readonly name: string;
   readonly declaringType: string | null;
-}
-
-export interface FieldCore {
-  readonly token: string;
-  readonly name: string;
-}
-
-export interface MemberRefCore {
-  readonly token: string;
-  readonly name: string;
 }
 
 export interface ParsedInstruction {
@@ -88,7 +82,7 @@ const rowRange = (
   return { first: start, last: end - 1, count: end - start };
 };
 
-const fullName = (namespace: string, name: string): string =>
+export const fullName = (namespace: string, name: string): string =>
   namespace.length === 0 ? name : `${namespace}.${name}`;
 
 const readTypeRange = (
@@ -242,7 +236,7 @@ export const parseTypes = (
   return { types: items, issues };
 };
 
-const readCompressed = (
+export const readCompressed = (
   bytes: Buffer,
   offset: number,
 ): { readonly value: number; readonly next: number } => {

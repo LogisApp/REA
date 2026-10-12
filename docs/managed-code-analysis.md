@@ -92,6 +92,18 @@ opposite observation's selection unknown, and application graphs report their
 selected scope as partial. Neither makes an absence claim about the whole
 assembly. Older member Evidence without `selection` remains readable.
 
+### Edge target declaring types
+
+`member_refs[].parent_name`, `call_edges[].target_declaring_type`, and
+`field_accesses[].field_declaring_type` name the type that declares each
+target. TypeDef and TypeRef names use the namespace-qualified `full_name`
+form, and nested types keep bare names. A generic-instantiation TypeSpec
+parent names its generic type, such as ``System.Collections.Generic.List`1``.
+Other TypeSpec forms, ModuleRef and MethodDef parents, and unreadable rows stay
+`null`. A `method-spec` call edge reports the name and declaring type of the
+generic method it instantiates. Older member Evidence without these fields
+reads them as `null`: unknown.
+
 ## Analysis objective
 
 REA's managed-code track is intended to answer five different questions without
