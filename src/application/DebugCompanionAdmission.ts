@@ -100,9 +100,9 @@ export const readMachoFileUuidEntries = async (
     magic === 0xcafebabe ||
     magic === 0xcafebabf ||
     magic === 0xbebafeca ||
-    magic === 0xbebafbfa;
+    magic === 0xbfbafeca;
   if (!universal) return readMachoUuidEntries(prefix.value);
-  const wide = magic === 0xcafebabf || magic === 0xbebafbfa;
+  const wide = magic === 0xcafebabf || magic === 0xbfbafeca;
   // The architecture table follows the observed container byte order.
   const big = magic === 0xcafebabe || magic === 0xcafebabf;
   const read32 = big
@@ -236,9 +236,20 @@ export const admitDebugCompanion = async (input: {
     input.targetSize,
   );
   if (!targetEntries.ok) return err({ reason: targetEntries.error });
+  // Mirror the target parser's FAT selection: the first slice of each CPU
+  // family is the one REA imports, so only that slice's UUID can admit a
+  // companion (a same-family sibling such as x86_64h is not the import).
   const selectedCpuTypes = CPU_TYPES[input.architecture];
+  const importedFamilies = new Set<number>();
   const selectedUuids = targetEntries.value
-    .filter(({ cpuType }) => selectedCpuTypes.includes(cpuType))
+    .filter(({ cpuType }) => {
+      const family = selectedCpuTypes.find(
+        (candidate) => candidate === cpuType,
+      );
+      if (family === undefined || importedFamilies.has(family)) return false;
+      importedFamilies.add(family);
+      return true;
+    })
     .map(({ uuid }) => uuid);
   if (selectedUuids.length === 0)
     return err({
@@ -246,9 +257,10 @@ export const admitDebugCompanion = async (input: {
     });
   for (const memberPath of memberPaths) {
     throwIfCancelled(signal);
-    const memberHandle = await open(memberPath, constants.O_RDONLY).catch(
-      () => undefined,
-    );
+    const memberHandle = await open(
+      memberPath,
+      constants.O_RDONLY | constants.O_NONBLOCK,
+    ).catch(() => undefined);
     if (memberHandle === undefined) continue;
     try {
       const initial = await memberHandle.stat();

@@ -195,6 +195,79 @@ describe("UUID entry attribution", () => {
   });
 });
 
+describe("LC_UUID admission invariants", () => {
+  const uuid = "A1B2C3D4-E5F6-0789-ABCD-EF0123456789";
+  const thinWithCommands = (
+    commands: readonly {
+      readonly kind: number;
+      readonly size: number;
+      readonly payload?: Buffer;
+    }[],
+  ): Buffer => {
+    const total = commands.reduce((sum, c) => sum + c.size, 0);
+    const bytes = Buffer.alloc(32 + total);
+    bytes.writeUInt32LE(0xfeedfacf, 0);
+    bytes.writeUInt32LE(0x0100000c, 4);
+    bytes.writeUInt32LE(commands.length, 16);
+    bytes.writeUInt32LE(total, 20);
+    let cursor = 32;
+    for (const command of commands) {
+      bytes.writeUInt32LE(command.kind, cursor);
+      bytes.writeUInt32LE(command.size, cursor + 4);
+      command.payload?.copy(bytes, cursor + 8);
+      cursor += command.size;
+    }
+    return bytes;
+  };
+  const uuidPayload = (text: string): Buffer =>
+    Buffer.from(text.replace(/-/gu, ""), "hex");
+
+  it("rejects a second LC_UUID in one image as a conflicting identity", () => {
+    const bytes = thinWithCommands([
+      { kind: 0x1b, size: 8 + 16, payload: uuidPayload(uuid) },
+      { kind: 0x1b, size: 8 + 16, payload: uuidPayload(uuid) },
+    ]);
+    expect(readMachoUuids(bytes).ok).toBe(false);
+  });
+  it("ignores a UUID payload beyond the declared command span", () => {
+    // ncmds=1, sizeofcmds=8: the trailing LC_UUID bytes are not a command.
+    const bytes = thinWithCommands([{ kind: 0x29, size: 8 }]);
+    Buffer.alloc(8 + 16).forEach(() => undefined);
+    const trailing = Buffer.alloc(8 + 16);
+    trailing.writeUInt32LE(0x1b, 0);
+    trailing.writeUInt32LE(8 + 16, 4);
+    uuidPayload(uuid).copy(trailing, 8);
+    const withTrailing = Buffer.concat([bytes, trailing]);
+    expect(readMachoUuids(withTrailing)).toEqual({ ok: true, value: [] });
+  });
+  it("rejects a short prefix instead of crashing on field access", () => {
+    const bytes = Buffer.alloc(12);
+    bytes.writeUInt32LE(0xcffaedfe, 0);
+    const result = readMachoUuids(bytes);
+    expect(result.ok).toBe(false);
+    if (!result.ok) expect(result.error).toContain("truncated");
+  });
+  it("decodes a byte-swapped FAT64 container", () => {
+    const slice = withUuidLoadCommand("44444444-4444-4444-4444-444444444444");
+    const entrySize = 32;
+    const headerSize = 8 + entrySize;
+    const bytes = Buffer.alloc(headerSize + slice.length);
+    bytes.writeUInt32LE(0xcafebabf, 0); // reads 0xbfbafeca big-endian
+    bytes.writeUInt32LE(1, 4);
+    const entry = 8;
+    bytes.writeUInt32LE(0x01000007, entry);
+    bytes.writeBigUInt64LE(BigInt(headerSize), entry + 8);
+    bytes.writeBigUInt64LE(BigInt(slice.length), entry + 16);
+    slice.copy(bytes, headerSize);
+    expect(readMachoUuidEntries(bytes)).toEqual({
+      ok: true,
+      value: [
+        { cpuType: 0x01000007, uuid: "44444444-4444-4444-4444-444444444444" },
+      ],
+    });
+  });
+});
+
 describe("debug companion UUID matching", () => {
   const uuid = "A1B2C3D4-E5F6-0789-ABCD-EF0123456789";
 

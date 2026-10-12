@@ -6,6 +6,7 @@ import { promisify } from "node:util";
 import { describe, expect, it } from "vitest";
 import { systemDoctorHost } from "../../../src/application/Doctor.js";
 import { parseBinaryTarget } from "../../../src/application/BinaryTargetResolver.js";
+import { binaryTargetSummary } from "../../../src/application/binary/BinaryTargetSummary.js";
 import { projectAnalysisError } from "../../../src/domain/analysisErrorProjection.js";
 import { createTestTempDirectory } from "../../fixtures/temporaryDirectory.js";
 
@@ -438,6 +439,13 @@ describe("debug companion fixture admission", () => {
       expect(companion?.memberPath).toContain(
         join("Contents", "Resources", "DWARF"),
       );
+      expect(binaryTargetSummary(result.value)).toMatchObject({
+        debug_companion: {
+          source_path: `${binary}.dSYM`,
+          uuid: companion?.uuid,
+          member_sha256: companion?.memberSha256,
+        },
+      });
     },
   );
 
@@ -618,6 +626,87 @@ describe("debug companion universal slice selection", () => {
       expect(projected).toMatchObject({
         code: "invalid_request",
         category: "invalid_input",
+        details: {
+          constraint: "debug_companion_rejected",
+          reason:
+            "dsym_path contains no Mach-O DWARF member whose LC_UUID matches the selected target slice",
+        },
+      });
+    },
+  );
+});
+
+describe("debug companion slice selection", () => {
+  it.skipIf(!onDarwin)(
+    "admits only the first slice of a CPU family, not a same-family sibling",
+    async () => {
+      const directory = await createTestTempDirectory("rea-dsym-sibling-");
+      const source = join(directory, "sibling.c");
+      await writeFile(
+        source,
+        [
+          "#include <stdio.h>",
+          "__attribute__((noinline)) int twice(int x) { return x * 2; }",
+          'int main(void) { printf("%d\\n", twice(21)); return 0; }',
+          "",
+        ].join("\n"),
+      );
+      const object = join(directory, "sibling.o");
+      const binary = join(directory, "sibling");
+      await execFileAsync("/usr/bin/xcrun", [
+        "clang",
+        "-O0",
+        "-g",
+        "-c",
+        source,
+        "-o",
+        object,
+        "-arch",
+        "x86_64",
+        "-arch",
+        "x86_64h",
+      ]);
+      await execFileAsync("/usr/bin/xcrun", [
+        "clang",
+        object,
+        "-o",
+        binary,
+        "-arch",
+        "x86_64",
+        "-arch",
+        "x86_64h",
+      ]);
+      await execFileAsync("/usr/bin/xcrun", [
+        "dsymutil",
+        binary,
+        "-o",
+        `${binary}.dSYM`,
+      ]);
+      const member = `${binary}.dSYM/Contents/Resources/DWARF/sibling`;
+      const siblingOnly = join(directory, "sibling-only.dSYM");
+      await execFileAsync("mkdir", [
+        "-p",
+        `${siblingOnly}/Contents/Resources/DWARF`,
+      ]);
+      await execFileAsync("/usr/bin/xcrun", [
+        "lipo",
+        "-thin",
+        "x86_64h",
+        member,
+        "-output",
+        `${siblingOnly}/Contents/Resources/DWARF/sibling`,
+      ]);
+      // The host-compat selection imports the first x86_64 family slice; a
+      // companion carrying only the x86_64h sibling UUID must not match.
+      const result = await parseBinaryTarget(binary, {
+        dsymPath: siblingOnly,
+        hostArchitecture: "x64",
+      });
+      if (result.ok)
+        throw new Error("same-family sibling companion was admitted");
+      const projected = projectAnalysisError(result.error);
+      expect(projected).toMatchObject({
+        code: "invalid_request",
         details: {
           constraint: "debug_companion_rejected",
           reason:

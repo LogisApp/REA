@@ -4,7 +4,7 @@ const LC_UUID = 0x1b;
 const FAT_MAGIC_BE = 0xcafebabe;
 const FAT_MAGIC_64_BE = 0xcafebabf;
 const FAT_MAGIC_LE = 0xbebafeca;
-const FAT_MAGIC_64_LE = 0xbebafbfa;
+const FAT_MAGIC_64_LE = 0xbfbafeca;
 const THIN_LITTLE_MAGICS = new Set([0xcefaedfe, 0xcffaedfe]);
 const THIN_BIG_MAGICS = new Set([0xfeedface, 0xfeedfacf]);
 const UUID_BYTES = 16;
@@ -28,8 +28,8 @@ const formatUuid = (raw: Buffer): string => {
 
 /**
  * The declared load-command span of a thin Mach-O image, with its byte
- * order, so a reader can fetch exactly the bytes the parser walks instead of
- * imposing an arbitrary window ceiling.
+ * order, so a reader can fetch exactly the bytes the parser walks. The span
+ * is bounded by the reader's region, not by an arbitrary ceiling.
  */
 export const machoCommandSpan = (
   bytes: Buffer,
@@ -47,8 +47,7 @@ export const machoCommandSpan = (
   const wide = magic === 0xfeedfacf || magic === 0xcffaedfe;
   const start = wide ? 32 : 28;
   const size = read32(20);
-  if (size < start || size > 0x8000000)
-    return err("Mach-O declared load-command span is invalid");
+  if (size < start) return err("Mach-O declared load-command span is invalid");
   return ok({ start, size, little });
 };
 
@@ -66,39 +65,56 @@ const readUuidsFromThin = (
     ? (position: number) => bytes.readUInt32LE(position)
     : (position: number) => bytes.readUInt32BE(position);
   const wide = magic === 0xfeedfacf || magic === 0xcffaedfe;
-  const commandsOffset = base + (wide ? 32 : 28);
+  const headerSize = wide ? 32 : 28;
+  const commandsOffset = base + headerSize;
+  // Field access requires a complete header; a short prefix is a rejection,
+  // not a crash.
   if (commandsOffset > end)
     return err("Mach-O header is truncated before its load commands");
   const cpuType = read32(base + 4);
   const commandCount = read32(base + 16);
+  // sizeofcmds excludes the header; its consistency is enforced by exact
+  // consumption below.
+  const declaredSize = read32(base + 20);
+  // Commands live exactly in the declared span; anything after it is not a
+  // load command no matter what the surrounding bytes look like.
+  const commandsEnd = Math.min(end, commandsOffset + declaredSize);
   let cursor = commandsOffset;
-  const entries: MachOUuidEntry[] = [];
+  let consumed = 0;
+  let observed: string | undefined;
   for (let index = 0; index < commandCount; index += 1) {
-    if (cursor + 8 > end)
+    if (cursor + 8 > commandsEnd)
       return err(`Mach-O load command ${String(index)} is truncated`);
     const command = read32(cursor);
     const size = read32(cursor + 4);
-    if (size < 8 || cursor + size > end)
+    if (size < 8 || cursor + size > commandsEnd)
       return err(`Mach-O load command ${String(index)} has an invalid size`);
     if (command === LC_UUID) {
       if (size < 8 + UUID_BYTES)
         return err("LC_UUID load command is truncated");
-      entries.push({
-        cpuType,
-        uuid: formatUuid(bytes.subarray(cursor + 8, cursor + 8 + UUID_BYTES)),
-      });
+      // A second LC_UUID in one image is a conflicting identity, not more
+      // evidence; admission must not pick whichever matches.
+      if (observed !== undefined)
+        return err("Mach-O image declares more than one LC_UUID");
+      observed = formatUuid(
+        bytes.subarray(cursor + 8, cursor + 8 + UUID_BYTES),
+      );
     }
     cursor += size;
+    consumed += size;
   }
-  return ok(entries);
+  if (consumed !== declaredSize || cursor !== commandsOffset + declaredSize)
+    return err(
+      "Mach-O load commands do not fill the declared load-command span",
+    );
+  return ok(observed === undefined ? [] : [{ cpuType, uuid: observed }]);
 };
 
 /**
- * Read every LC_UUID of a Mach-O image with the declaring image's cputype,
- * descending into universal (FAT) containers. Slice order is preserved so a
- * caller can attribute each UUID to its architecture; integer accessors
- * follow each image's observed byte order. A zero UUID is preserved: it is an
- * observed value, not an unknown.
+ * Read the LC_UUID of a Mach-O image with its declaring cputype, descending
+ * into universal (FAT) containers of either byte order. Slice order is
+ * preserved so a caller can attribute each UUID to its architecture; a zero
+ * UUID is preserved: it is an observed value, not an unknown.
  */
 export const readMachoUuidEntries = (
   bytes: Buffer,
@@ -113,10 +129,10 @@ export const readMachoUuidEntries = (
   if (fat) {
     const wide = magic === FAT_MAGIC_64_BE || magic === FAT_MAGIC_64_LE;
     // The architecture table's byte order follows the observed magic.
-    const read32 =
-      magic === FAT_MAGIC_BE || magic === FAT_MAGIC_64_BE
-        ? (position: number) => bytes.readUInt32BE(position)
-        : (position: number) => bytes.readUInt32LE(position);
+    const big = magic === FAT_MAGIC_BE || magic === FAT_MAGIC_64_BE;
+    const read32 = big
+      ? (position: number) => bytes.readUInt32BE(position)
+      : (position: number) => bytes.readUInt32LE(position);
     const count = read32(4);
     const entrySize = wide ? 32 : 20;
     if (count > 128 || 8 + count * entrySize > bytes.length)
@@ -126,7 +142,6 @@ export const readMachoUuidEntries = (
     const entries: MachOUuidEntry[] = [];
     for (let index = 0; index < count; index += 1) {
       const entry = 8 + index * entrySize;
-      const big = magic === FAT_MAGIC_BE || magic === FAT_MAGIC_64_BE;
       const cpuType = big ? bytes.readInt32BE(entry) : bytes.readInt32LE(entry);
       const sliceOffset = wide
         ? Number(
