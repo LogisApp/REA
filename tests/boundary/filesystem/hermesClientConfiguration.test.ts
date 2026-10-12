@@ -186,7 +186,15 @@ mcp_servers:
     });
   });
 
-  it.each(["", "\n"])(
+  // Comments and a bare document marker parse to a null document, like an
+  // empty file, and are kept ahead of the new registration.
+  it.each([
+    "",
+    "\n",
+    "# Hermes configuration\n",
+    "---\n",
+    "---\n# Hermes configuration\n",
+  ])(
     "configures an empty config.yaml %j as a new document",
     async (original) => {
       const { home, client } = await hermesClient();
@@ -194,7 +202,10 @@ mcp_servers:
       expect(
         (await configureClientConfiguration(client, {}, command)).status,
       ).toBe("configured");
-      expect(parseYaml(await readFile(client.configPath, "utf8"))).toEqual({
+      const text = await readFile(client.configPath, "utf8");
+      const kept = original.trimEnd();
+      expect(text.slice(0, kept.length)).toBe(kept);
+      expect(parseYaml(text)).toEqual({
         mcp_servers: {
           rea: { command: command[0], args: command.slice(1), enabled: true },
         },
