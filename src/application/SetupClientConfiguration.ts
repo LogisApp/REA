@@ -1,6 +1,7 @@
 import { readClientPolicyBlock } from "./GeminiClientSettings.js";
 import { readClientConfigurationFiles } from "./ClientConfigurationFiles.js";
 import {
+  applyRegistrationStartupTimeout,
   clientRegistrationEntry,
   clientConfigurationValuesEqual,
   clientServerListedDisabled,
@@ -21,7 +22,6 @@ import { clientRegistrationEnvironment } from "./ClientRegistrationEnvironment.j
 
 import { PRODUCT_IDENTITY } from "../identity.js";
 import { npxRegistrationCommand } from "./ClientRegistrationIdentity.js";
-import { MCP_STARTUP_POLICY } from "../mcpStartupPolicy.js";
 import { resolveClientConfigTransactionPath } from "./ClientConfigPath.js";
 import {
   readRegularFileText,
@@ -418,24 +418,21 @@ const clientConfigurationDesired = (
     providerEnvironment,
   );
   if (!environment.ok) throw environment.error;
-  const registration = clientRegistrationEntry(
-    format,
-    command.length === 0 ? [PRODUCT_IDENTITY.cliBinary, "mcp"] : command,
-    environment.value,
+  const registration = applyRegistrationStartupTimeout(
+    client.name,
+    clientRegistrationEntry(
+      format,
+      command.length === 0 ? [PRODUCT_IDENTITY.cliBinary, "mcp"] : command,
+      environment.value,
+    ),
   );
   // Keep fields the user added to REA's own entry, such as OMP `timeout`. A
   // legacy OpenCode V1 entry migrating into a V2 table keeps only its
-  // environment, because its other fields belong to the V1 shape.
+  // environment, because its other fields belong to the V1 shape. The approval
+  // plan states that exception through describeClientRegistrationRetention.
   return retainClientRegistrationFields(
     format,
     parsed?.servers[PRODUCT_IDENTITY.mcpServerKey],
-    {
-      ...registration,
-      ...(client.name === "codex" || client.name === "grok_build"
-        ? {
-            startup_timeout_sec: MCP_STARTUP_POLICY.codexStartupTimeoutSeconds,
-          }
-        : {}),
-    },
+    registration,
   );
 };

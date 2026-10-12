@@ -1,6 +1,6 @@
 import { join } from "node:path";
 
-import { MCP_STARTUP_POLICY } from "../mcpStartupPolicy.js";
+import { describeClientRegistrationRetention } from "./ClientConfigurationDocument.js";
 import { isOwnedClientRegistrationCommand } from "./ClientRegistrationIdentity.js";
 import {
   linuxHopperInstallDisclosure,
@@ -262,6 +262,7 @@ const setupPlan = (input: {
         {
           name: client.name,
           label: client.displayName ?? client.name,
+          format: client.format,
         },
         input.command,
         input.providerEnvironment,
@@ -306,7 +307,11 @@ const majorVersion = (version: string): number =>
   Number.parseInt(version.split(".")[0] ?? "0", 10);
 
 const clientConfigurationDetail = (
-  client: { readonly name: string; readonly label: string },
+  client: {
+    readonly name: string;
+    readonly label: string;
+    readonly format: SetupClient["format"];
+  },
   command: readonly string[],
   environment: SetupProviderEnvironment,
   installHopper: boolean,
@@ -314,7 +319,14 @@ const clientConfigurationDetail = (
   const entries = Object.entries(environment)
     .sort(([left], [right]) => left.localeCompare(right))
     .map(([name, value]) => `${name}=${value}`);
-  const retainedFields = localEntryDisclosure(client.name);
+  const dialect =
+    client.format === undefined || client.format === "unsupported"
+      ? "json"
+      : client.format;
+  const retainedFields = describeClientRegistrationRetention(
+    client.name,
+    dialect,
+  );
   const environmentDetail =
     entries.length === 0
       ? ` No additional provider environment variables. Existing server environment overrides are retained. ${retainedFields}`
@@ -325,20 +337,4 @@ const clientConfigurationDetail = (
       : " The HOPPER_LAUNCHER_PATH value shown above is the current fallback; if this plan installs Hopper, REA will replace it with the launcher path reported by that installation."
     : "";
   return `Add the REA MCP registration for ${client.label}; preserve unrelated configuration. Command: ${command.map((part) => JSON.stringify(part)).join(" ")}.${environmentDetail}${hopperDetail}`;
-};
-
-/** Say which entry fields setup rewrites, removes, or keeps before approval. */
-const localEntryDisclosure = (clientName: string): string => {
-  const rewritten =
-    clientName === "codex" || clientName === "grok_build"
-      ? `startup_timeout_sec, which setup sets to ${String(MCP_STARTUP_POLICY.codexStartupTimeoutSeconds)}, `
-      : clientName === "copilot_cli"
-        ? "tools, which setup sets to every tool, "
-        : "";
-  const removed =
-    clientName === "grok_build"
-      ? "remote-server keys, an enabled: false switch, and non-boolean enabled or disabled values, which are removed. A boolean entry disabled flag is kept."
-      : "remote-server keys, switches that turn the server off, and non-boolean enabled or disabled values, which are removed.";
-  const exceptions = rewritten === "" ? removed : `${rewritten}and ${removed}`;
-  return `On an existing local command entry, user fields are kept except ${exceptions} When that entry is remote, its other fields are replaced.`;
 };
