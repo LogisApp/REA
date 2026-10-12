@@ -13,6 +13,7 @@ import {
   serializeClientConfiguration,
   withClientServers,
   type ClientConfigurationDocument,
+  type ClientRegistrationDialect,
 } from "./ClientConfigurationDocument.js";
 import { constants as fsConstants } from "node:fs";
 import { copyFile, mkdir, rm, writeFile } from "node:fs/promises";
@@ -314,7 +315,8 @@ export const inspectClientConfiguration = async (
     original = await readRegularFileText(transactionPath);
   } catch (cause: unknown) {
     if (cause instanceof RegularFileCleanupFailure) throw cause;
-    if (isMissing(cause)) return { status: "create" };
+    if (isMissing(cause))
+      return { status: "create", dialect: clientRegistrationDialect(client) };
     return {
       status: "invalid",
       remediation: `The configuration file could not be read. Check its permissions before rerunning setup. ${cause instanceof Error ? cause.message : String(cause)}`,
@@ -343,7 +345,12 @@ export const inspectClientConfiguration = async (
       parsed,
     );
     if (registrationCurrent(parsed, desired))
-      return { status: "already_current" };
+      return { status: "already_current", dialect: parsed.dialect };
+    return {
+      status: "update",
+      backupPath: `${client.configPath}.rea.backup`,
+      dialect: parsed.dialect,
+    };
   } catch (cause: unknown) {
     if (cause instanceof RegularFileCleanupFailure) throw cause;
     // Malformed configuration is reported with the invalid remediation.
@@ -354,11 +361,14 @@ export const inspectClientConfiguration = async (
         "The existing configuration is malformed. Repair it before setup applies any other changes.",
     };
   }
-  return {
-    status: "update",
-    backupPath: `${client.configPath}.rea.backup`,
-  };
 };
+
+const clientRegistrationDialect = (
+  client: SetupClient,
+): ClientRegistrationDialect =>
+  client.format === undefined || client.format === "unsupported"
+    ? "json"
+    : client.format;
 
 const isMissing = (cause: unknown): boolean =>
   cause instanceof Error && "code" in cause && cause.code === "ENOENT";
