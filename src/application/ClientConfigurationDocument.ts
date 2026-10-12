@@ -55,6 +55,23 @@ export interface ClientConfigurationDocument {
 
 const objectSchema = z.record(z.string(), z.unknown());
 
+/**
+ * Require a plain object for a configuration root or server table. Zod's
+ * issue dump does not name the offending key for callers.
+ */
+const asConfigurationObject = (
+  value: unknown,
+  label: "root" | string,
+): Record<string, unknown> => {
+  if (typeof value === "object" && value !== null && !Array.isArray(value))
+    return value as Record<string, unknown>;
+  throw new TypeError(
+    label === "root"
+      ? "The configuration root must be an object"
+      : `"${label}" must be an object`,
+  );
+};
+
 /** Compare parsed configuration values without depending on parser prototypes. */
 export const clientConfigurationValuesEqual = (
   left: unknown,
@@ -106,16 +123,17 @@ const parseDocument = (
   format: ClientConfigurationFormat,
 ): Record<string, unknown> => {
   if (format === "toml" || format === "grok")
-    return objectSchema.parse(parseToml(text));
+    return asConfigurationObject(parseToml(text), "root");
   // Pi loads `mcp.json` with a strict `JSON.parse` and no BOM tolerance, so
   // comments, trailing commas, a BOM, or an empty existing file must be
   // rejected instead of registering into a document Pi cannot load.
-  if (format === "pi") return objectSchema.parse(JSON.parse(text));
+  if (format === "pi") return asConfigurationObject(JSON.parse(text), "root");
   // An empty file, which some clients create before any server is added,
   // holds no settings to preserve.
   if (isEmptyClientConfigurationText(text)) return {};
   // Hermes stores MCP servers in `mcp_servers` inside a YAML document.
-  if (format === "hermes") return objectSchema.parse(parseYaml(text));
+  if (format === "hermes")
+    return asConfigurationObject(parseYaml(text), "root");
   const errors: ParseError[] = [];
   // Accept a UTF-8 BOM without shifting diagnostics or editing the original text.
   const jsonText = text.startsWith("\uFEFF") ? ` ${text.slice(1)}` : text;
@@ -125,7 +143,7 @@ const parseDocument = (
     throw new SyntaxError(
       `Invalid JSON/JSONC at offset ${firstError.offset}: ${printParseErrorCode(firstError.error)}`,
     );
-  return objectSchema.parse(document);
+  return asConfigurationObject(document, "root");
 };
 
 /** Members of OpenCode V2's `mcp` object that are not server names. */
@@ -143,7 +161,8 @@ export const parseClientConfiguration = (
   const document = parseDocument(text, format);
   const serversKey = clientConfigurationServersKey(format);
   const value = document[serversKey];
-  const servers = value === undefined ? {} : objectSchema.parse(value);
+  const servers =
+    value === undefined ? {} : asConfigurationObject(value, serversKey);
   const native = servers.servers;
   // A V1 server named `servers` has a string `type` discriminator; the V2
   // table may instead hold a server object named `type`.
@@ -164,7 +183,7 @@ export const parseClientConfiguration = (
     };
   return {
     document,
-    servers: objectSchema.parse(native),
+    servers: asConfigurationObject(native, "servers"),
     serversPath: [serversKey, "servers"],
     dialect: "opencode_v2",
     legacyServers: Object.fromEntries(

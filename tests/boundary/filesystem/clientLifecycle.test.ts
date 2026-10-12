@@ -1593,6 +1593,32 @@ describe("uninstall configuration preflight", () => {
     expect(await readFile(config, "utf8")).toBe("not-json");
   });
 
+  it.each([
+    ['{"mcpServers":null,"keep":1}', '"mcpServers" must be an object'],
+    ["[]", "The configuration root must be an object"],
+    ['{"mcpServers":"x"}', '"mcpServers" must be an object'],
+  ] as const)(
+    "names a structural shape problem without claiming invalid JSON: %s",
+    async (original, problem) => {
+      const home = await createTestTempDirectory("rea-uninstall-shape-");
+      roots.push(home);
+      const config = join(home, ".cursor/mcp.json");
+      await mkdir(dirname(config), { recursive: true });
+      await writeFile(config, original);
+      const result = await runUninstall(false, systemUninstallHost(home));
+      expect(result.status).toBe("failed");
+      expect(result.items).toContainEqual(
+        expect.objectContaining({
+          name: "cursor",
+          status: "failed",
+          detail: `${problem} and was not changed. Repair it, then rerun uninstall.`,
+        }),
+      );
+      expect(await readFile(config, "utf8")).toBe(original);
+      await expect(readFile(`${config}.rea.backup`, "utf8")).rejects.toThrow();
+    },
+  );
+
   it("stops before any removal when one client configuration is malformed", async () => {
     const home = await createTestTempDirectory("rea-uninstall-stop-");
     roots.push(home);

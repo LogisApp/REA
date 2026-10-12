@@ -5,7 +5,11 @@ import { describe, expect, it } from "vitest";
 import { createTestTempDirectory } from "../../fixtures/temporaryDirectory.js";
 
 import { resolveClientConfigTransactionPath } from "../../../src/application/ClientConfigPath.js";
-import { configureClientConfiguration } from "../../../src/application/SetupClientConfiguration.js";
+import { readConfigurationFile } from "../../../src/application/ClientConfigurationFiles.js";
+import {
+  configureClientConfiguration,
+  inspectClientConfiguration,
+} from "../../../src/application/SetupClientConfiguration.js";
 import { PRODUCT_IDENTITY } from "../../../src/identity.js";
 
 const pinnedPackage = PRODUCT_IDENTITY.registrationPackageSpecifier;
@@ -329,4 +333,37 @@ describe("JSON client configuration migration and provider paths", () => {
       readFile(`${configPath}.rea.backup`, "utf8"),
     ).rejects.toThrow();
   });
+});
+
+describe("JSON client configuration shape diagnostics", () => {
+  it.each([
+    ['{"mcpServers":null,"keep":1}', '"mcpServers" must be an object'],
+    ["[]", "The configuration root must be an object"],
+    ['{"mcpServers":"x"}', '"mcpServers" must be an object'],
+  ] as const)(
+    "names structural shape problems in setup remediation: %s",
+    async (original, problem) => {
+      const directory = await createTestTempDirectory("rea-setup-shape-");
+      const configPath = join(directory, "mcp.json");
+      const client = {
+        name: "cursor",
+        configPath,
+        format: "json" as const,
+      };
+      await writeFile(configPath, original);
+      const read = await readConfigurationFile(configPath, "json");
+      expect(read.ok).toBe(false);
+      if (read.ok) throw new Error("expected malformed configuration");
+      expect(read.error.detail).toBe(
+        `Configuration ${configPath} is malformed: ${problem}`,
+      );
+      expect(
+        await inspectClientConfiguration(client, {}, ["rea", "mcp"]),
+      ).toEqual({
+        status: "invalid",
+        remediation: `Configuration ${configPath} is malformed: ${problem}`,
+      });
+      expect(await readFile(configPath, "utf8")).toBe(original);
+    },
+  );
 });

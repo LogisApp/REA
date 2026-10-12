@@ -279,14 +279,13 @@ const readClientConfiguration = async (
     const parsed = parseClientConfiguration(original, client.format);
     return { kind: "configuration", transactionPath, original, parsed };
   } catch (cause: unknown) {
-    void cause;
-    return itemRead(
-      item(
-        client.name,
-        "failed",
-        `Configuration is not valid ${client.format === "toml" || client.format === "grok" ? "TOML" : client.format === "opencode" ? "JSONC" : "JSON"} and was not changed. Repair it, then rerun uninstall.`,
-      ),
-    );
+    // Shape TypeErrors name the bad root or server table; parse failures stay
+    // as "not valid <format>" so uninstall does not claim the text failed JSON.
+    const detail =
+      cause instanceof TypeError
+        ? `${cause.message} and was not changed. Repair it, then rerun uninstall.`
+        : `Configuration is not valid ${client.format === "toml" || client.format === "grok" ? "TOML" : client.format === "opencode" ? "JSONC" : "JSON"} and was not changed. Repair it, then rerun uninstall.`;
+    return itemRead(item(client.name, "failed", detail));
   }
 };
 
