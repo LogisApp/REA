@@ -8,10 +8,10 @@ import type { ManagedPeLayout } from "./ManagedPeReader.js";
 import type { ManagedParseIssue } from "../domain/managed/managedArtifact.js";
 import type { ManagedMetadataLayout } from "./ManagedMetadataLayout.js";
 import {
-  createDeclaringTypeLookup,
   signature,
   type FieldCore,
   type ManagedCallEdge,
+  type ManagedExportedType,
   type ManagedField,
   type ManagedFieldAccess,
   type ManagedMemberRef,
@@ -30,11 +30,25 @@ import {
 } from "./ManagedMetadataHeaps.js";
 import { readManagedValue } from "./ManagedReaderFailure.js";
 import { methodBody } from "./ManagedMethodBodyReader.js";
+import { memberDeclaringTypeRowLookup } from "./ManagedMemberOwnership.js";
+
+/**
+ * Declaring-type tokens whose members are decoded in full; null selects every
+ * type. Unselected members keep only their name so edges stay labelled.
+ */
+export type SelectedTypeTokens = ReadonlySet<string> | null;
+
+const isSelected = (
+  selected: SelectedTypeTokens,
+  declared: { readonly token: string } | undefined,
+): boolean =>
+  selected === null || (declared !== undefined && selected.has(declared.token));
 
 export const parseFields = (
   bytes: Buffer,
   layout: ManagedMetadataLayout,
   ranges: readonly TypeRange[],
+  selected: SelectedTypeTokens = null,
 ): {
   readonly fields: readonly ManagedField[];
   readonly core: ReadonlyMap<string, FieldCore>;
@@ -44,7 +58,10 @@ export const parseFields = (
   const core = new Map<string, FieldCore>();
   const issues: ManagedParseIssue[] = [];
   const table = layout.table(4);
-  const declaringType = createDeclaringTypeLookup(ranges, "field");
+  const ownerRow = readManagedValue(
+    () => memberDeclaringTypeRowLookup(bytes, layout, 4),
+    issues,
+  );
   for (let row = 1; row <= (table?.rowCount ?? 0); row += 1) {
     readManagedValue(() => {
       const cursor = metadataRowCursor(bytes, layout, 4, row);
@@ -55,14 +72,20 @@ export const parseFields = (
         cursor.readIndex(layout.stringIndexSize),
         layout.strings.size,
       );
+      const owner =
+        ownerRow === undefined
+          ? 0
+          : (readManagedValue(() => ownerRow(row), issues) ?? 0);
+      const declared = ranges[owner - 1];
+      const token = metadataToken(4, row);
+      core.set(token, { token, name });
+      if (!isSelected(selected, declared)) return;
       const sig = readMetadataBlob(
         bytes,
         layout,
         cursor.readIndex(layout.blobIndexSize),
         layout.blob.size,
       );
-      const declared = declaringType(row);
-      const token = metadataToken(4, row);
       fields.push({
         token,
         row_offset: cursor.start,
@@ -72,10 +95,80 @@ export const parseFields = (
         flags,
         signature: budgetedSignature(sig, layout),
       });
-      core.set(token, { token, name });
     }, issues);
   }
   return { fields, core, issues };
+};
+
+const TYPE_FORWARDER_FLAG = 0x0020_0000;
+
+/** Read ExportedType rows, including type forwarders, as declared. */
+export const parseExportedTypes = (
+  bytes: Buffer,
+  layout: ManagedMetadataLayout,
+): {
+  readonly exportedTypes: readonly ManagedExportedType[];
+  readonly issues: readonly ManagedParseIssue[];
+} => {
+  const exportedTypes: ManagedExportedType[] = [];
+  const issues: ManagedParseIssue[] = [];
+  const table = layout.table(39);
+  for (let row = 1; row <= (table?.rowCount ?? 0); row += 1) {
+    readManagedValue(() => {
+      const cursor = metadataRowCursor(bytes, layout, 39, row);
+      const flags = cursor.readUInt32();
+      const typeDefId = cursor.readUInt32();
+      const name = readMetadataString(
+        bytes,
+        layout,
+        cursor.readIndex(layout.stringIndexSize),
+        layout.strings.size,
+      );
+      const namespace = readMetadataString(
+        bytes,
+        layout,
+        cursor.readIndex(layout.stringIndexSize),
+        layout.strings.size,
+      );
+      const implementationOffset = cursor.offset;
+      const implementationRaw = cursor.readIndex(
+        layout.codedIndexSize("Implementation"),
+      );
+      const token = metadataToken(39, row);
+      const implementationReason = metadataCodedTokenInvalidReason(
+        implementationRaw,
+        2,
+        [38, 35, 39],
+        layout.rowCounts,
+      );
+      if (implementationReason !== null || implementationRaw === 0)
+        issues.push({
+          code: "invalid-row",
+          scope: `metadata.ExportedType:${token}`,
+          offset: implementationOffset,
+          detail:
+            implementationReason === null
+              ? "ExportedType implementation coded index 0x0 is null, but the Implementation column must reference a row"
+              : `ExportedType implementation coded index 0x${implementationRaw.toString(16)} is invalid: ${implementationReason}`,
+        });
+      exportedTypes.push({
+        token,
+        row_offset: cursor.start,
+        namespace,
+        name,
+        flags,
+        forwarder: (flags & TYPE_FORWARDER_FLAG) !== 0,
+        type_def_id: typeDefId,
+        implementation_token: metadataCodedToken(
+          implementationRaw,
+          2,
+          [38, 35, 39],
+          layout.rowCounts,
+        ),
+      });
+    }, issues);
+  }
+  return { exportedTypes, issues };
 };
 
 export const parseMemberRefs = (
@@ -148,6 +241,7 @@ interface ParseMethodsInput {
   readonly layout: ManagedMetadataLayout;
   readonly pe: ManagedPeLayout;
   readonly ranges: readonly TypeRange[];
+  readonly selected?: SelectedTypeTokens;
 }
 
 export const parseMethods = ({
@@ -155,6 +249,7 @@ export const parseMethods = ({
   layout,
   pe,
   ranges,
+  selected = null,
 }: ParseMethodsInput): {
   readonly methods: readonly ManagedMethod[];
   readonly core: ReadonlyMap<string, MethodCore>;
@@ -164,7 +259,10 @@ export const parseMethods = ({
   const core = new Map<string, MethodCore>();
   const issues: ManagedParseIssue[] = [];
   const table = layout.table(6);
-  const declaringType = createDeclaringTypeLookup(ranges, "method");
+  const ownerRow = readManagedValue(
+    () => memberDeclaringTypeRowLookup(bytes, layout, 6),
+    issues,
+  );
   for (let row = 1; row <= (table?.rowCount ?? 0); row += 1) {
     readManagedValue(() => {
       const cursor = metadataRowCursor(bytes, layout, 6, row);
@@ -177,6 +275,18 @@ export const parseMethods = ({
         cursor.readIndex(layout.stringIndexSize),
         layout.strings.size,
       );
+      const owner =
+        ownerRow === undefined
+          ? 0
+          : (readManagedValue(() => ownerRow(row), issues) ?? 0);
+      const declared = ranges[owner - 1];
+      const token = metadataToken(6, row);
+      core.set(token, {
+        token,
+        name,
+        declaringType: declared?.fullName ?? null,
+      });
+      if (!isSelected(selected, declared)) return;
       const sig = readMetadataBlob(
         bytes,
         layout,
@@ -184,8 +294,6 @@ export const parseMethods = ({
         layout.blob.size,
       );
       cursor.readIndex(layout.tableIndexSize(8));
-      const declared = declaringType(row);
-      const token = metadataToken(6, row);
       methods.push({
         token,
         row_offset: cursor.start,
@@ -203,11 +311,6 @@ export const parseMethods = ({
           { implFlags, flags },
           managedDecodeBudget(layout),
         ),
-      });
-      core.set(token, {
-        token,
-        name,
-        declaringType: declared?.fullName ?? null,
       });
     }, issues);
   }

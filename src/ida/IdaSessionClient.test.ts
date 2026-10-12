@@ -1054,6 +1054,43 @@ describe("IDA #551 invalid worker release safety", () => {
   });
 });
 
+describe("IDA reaped session with no upstream release proof", () => {
+  it.each(["Session not found", "Session not found: another-session"])(
+    "retains its private workspace for %s despite an empty legacy inventory",
+    async (error) => {
+      const { producer, client, root } = await fixture("headless");
+      expect((await client.execute("health", {})).ok).toBe(true);
+      const sessionId = producer.database;
+      let missing = true;
+      producer.beforeCall = async (name) => {
+        if (name === "idb_close" && missing) producer.database = undefined;
+      };
+      producer.overrideCall = (name) =>
+        name === "idb_close" && missing ? { error } : undefined;
+
+      const result = await client.close();
+      expect(result.ok).toBe(false);
+      if (!result.ok) expect(result.error.cleanupIncomplete).toBe(true);
+      expect(producer.closes).toBe(0);
+      expect(producer.database).toBeUndefined();
+      expect(
+        (await readdir(root)).some((name) => name.startsWith("rea-ida-")),
+      ).toBe(true);
+      expect(
+        producer.calls.filter(({ name }) => name === "idb_list"),
+      ).toHaveLength(1);
+
+      // Only a later, genuinely active owned session returning a normal close
+      // acknowledgement can release the retained legacy workspace.
+      missing = false;
+      producer.database = sessionId;
+      expect((await client.close()).ok).toBe(true);
+      expect(producer.closes).toBe(1);
+      expect(await readdir(root)).toEqual(["target.elf"]);
+    },
+  );
+});
+
 describe("headless IDA cleanup verification", () => {
   it("retries failed worker release through the retained connection before removing its workspace", async () => {
     const { producer, client, root } = await fixture("headless");

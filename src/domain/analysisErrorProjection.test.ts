@@ -25,6 +25,38 @@ import { ProviderSelectionError } from "./providerSelectionError.js";
 import { analysisErrorProjectionSchema } from "../contracts/errorSchemas.js";
 import { nativeCallPartialObservationSchema } from "./native/nativeCallPartialObservation.js";
 
+it("projects a published file receipt alongside retained cleanup failure", () => {
+  const projected = projectAnalysisError(
+    new EvidenceFileError("write", "io", {
+      path: "/tmp/evidence.json",
+      published: { path: "/tmp/evidence.json", bytes: 42 },
+      cleanup: {
+        reason: "staging directory is still owned",
+        resources: ["/tmp/.rea-write-abc"],
+      },
+      cause: new Error("cleanup incomplete"),
+    }),
+  );
+  expect(projected).toMatchObject({
+    code: "cleanup_incomplete",
+    message:
+      "The output file was published, but staging cleanup remains incomplete.",
+    remediation: {
+      action:
+        "Use the published file at details.published_path and resolve the reported staging cleanup failure.",
+    },
+    details: {
+      operation: "write",
+      path: "/tmp/evidence.json",
+      published: true,
+      published_path: "/tmp/evidence.json",
+      bytes: 42,
+      resources: ["/tmp/.rea-write-abc"],
+    },
+  });
+  expect(analysisErrorProjectionSchema.safeParse(projected).success).toBe(true);
+});
+
 const nativeCallPartialObservation = nativeCallPartialObservationSchema.parse({
   kind: "native-call-observation",
   target: {
@@ -384,6 +416,38 @@ describe("analysis error projection: provider failures", () => {
   });
 });
 
+describe("analysis error projection: retry guidance", () => {
+  it.each([
+    [
+      "unreadable output",
+      new AnalysisOutputError("inspect_firmware_regions", "report missing"),
+      "unreadable_output",
+    ],
+    [
+      "adapter failure",
+      new ProviderAdapterError("firmware", "inspect_firmware_regions"),
+      "execution_failure",
+    ],
+    [
+      "Hopper remote failure",
+      new HopperRemoteError(7, "Hopper analysis failed", {
+        diagnosticType: "bridge_exception",
+        operation: "trace_feature",
+      }),
+      "execution_failure",
+    ],
+  ])(
+    "does not recommend an unchanged retry for non-retryable %s",
+    (_name, error, code) => {
+      const projected = projectAnalysisError(error);
+
+      expect(projected).toMatchObject({ code, retryable: false });
+      for (const text of [projected.message, projected.remediation.action])
+        expect(text).not.toMatch(/\bretry\b/iu);
+    },
+  );
+});
+
 describe("analysis error projection: caller contract", () => {
   it("preserves the reported output constraint without exposing its internal cause", () => {
     const projected = projectAnalysisError(
@@ -540,7 +604,7 @@ describe("analysis error projection: caller contract", () => {
 describe("analysis error projection: operational diagnostics", () => {
   it("distinguishes an observed Hopper exit from an undetermined provider failure", () => {
     const exited = projectAnalysisError(
-      new HopperProcessError(7, undefined, "search_strings", 4),
+      new HopperProcessError(7, { operation: "search_strings", requestId: 4 }),
     );
     expect(exited).toMatchObject({
       code: "provider_unavailable",
@@ -558,7 +622,10 @@ describe("analysis error projection: operational diagnostics", () => {
     expect(exited.remediation.action).toContain("Restart the owned provider");
 
     const unknown = projectAnalysisError(
-      new HopperProcessError(null, undefined, "search_strings", 5),
+      new HopperProcessError(null, {
+        operation: "search_strings",
+        requestId: 5,
+      }),
     );
     expect(unknown.details).toMatchObject({
       stage: "analysis",

@@ -11,7 +11,10 @@ import type { JavaScriptSemanticIr } from "../../domain/javascript/javascriptSem
 import { projectJavaScriptModuleSemantics } from "../../domain/javascript/javascriptModuleSemanticIr.js";
 import { parseJavaScriptSource } from "../../domain/javascript/javascriptSourceParser.js";
 import { hasValidSourceMapContents } from "../../domain/sourceMapContents.js";
-import { flattenSourceMapLeaves } from "../../domain/sourceMapEnvelope.js";
+import {
+  flattenSourceMapLeaves,
+  sourceMapJsonText,
+} from "../../domain/sourceMapEnvelope.js";
 import type {
   JavaScriptSourceRange,
   JavaScriptSourcePoint,
@@ -137,12 +140,24 @@ export const analyzeAndAdoptJavaScriptArtifactFiles = async (
 }> => {
   const state = emptyArtifactAnalysis<JavaScriptModuleSemanticIr>();
   let interruption: AnalysisError | null = null;
-  for (const [index, file] of fileSet.files.entries()) {
+  const selectedFileCount =
+    fileSet.files.length - (fileSet.source_selection?.unselected_files ?? 0);
+  let selectedFileIndex = 0;
+  for (const file of fileSet.files) {
     try {
       await setImmediate();
-      await beforeFile(file, index, fileSet.files.length);
+      if (classifyOutsideAnalysisScope(file, state, projection)) {
+        if (signal?.aborted === true) {
+          interruption = new AnalysisCancelledError(
+            "analyze_javascript_application",
+          );
+          break;
+        }
+        continue;
+      }
       if (signal?.aborted === true)
         throw new AnalysisCancelledError("analyze_javascript_application");
+      await beforeFile(file, selectedFileIndex++, selectedFileCount);
       if (file.kind !== "javascript" || !file.text.included) {
         const steps = analyzeArtifactFileSteps(file, {
           state,
@@ -267,6 +282,7 @@ export const analyzeAndAdoptJavaScriptArtifactFiles = async (
     };
     for (const file of fileSet.files) {
       if (analyzedPaths.has(file.path)) continue;
+      if (classifyOutsideAnalysisScope(file, state, projection)) continue;
       state.files.push({
         file,
         javascript: null,
@@ -336,6 +352,7 @@ function* analyzeArtifactFileSteps<
   context: ArtifactAnalysisContext<SemanticIr>,
 ): Generator<void, void> {
   const { state } = context;
+  if (classifyOutsideAnalysisScope(file, state)) return;
   addStructuredObservations(file, state);
   if (file.kind === "html" && file.text.included)
     state.htmlScripts.push(...parseHtmlScripts(file.path, file.text.value));
@@ -382,6 +399,26 @@ function* analyzeArtifactFileSteps<
   );
   if (analysis.parse_status === "failed") state.parseFailures += 1;
 }
+
+const classifyOutsideAnalysisScope = <
+  SemanticIr extends JavaScriptModuleSemanticIr,
+>(
+  file: JavaScriptArtifactFile,
+  state: MutableArtifactAnalysis<SemanticIr>,
+  projection?: JavaScriptSemanticGraphProjection,
+): boolean => {
+  if (file.text.included || file.text.reason !== "outside-analysis-scope")
+    return false;
+  state.files.push({ file, javascript: null, semantic: null });
+  if (file.kind === "javascript")
+    projection?.recordUnavailableFile(
+      file,
+      "Source was not analyzed because it is outside the caller-selected source_paths.",
+      null,
+      "incomplete-module",
+    );
+  return true;
+};
 
 const addSourceMap = (
   file: JavaScriptArtifactFile,
@@ -486,12 +523,12 @@ const parseSourceMap = (
   if (!file.text.included) return unavailableSourceMap(file);
   let value: unknown;
   try {
-    value = JSON.parse(file.text.value);
+    value = JSON.parse(sourceMapJsonText(file.text.value));
   } catch (cause: unknown) {
     void cause;
     return invalidSourceMap(file, "Source map is not valid JSON.");
   }
-  const maps = flattenSourceMaps(value);
+  const maps = flattenSourceMapLeaves(value);
   if (maps === undefined)
     return invalidSourceMap(file, "Source map is not a version 3 map.");
   return collectSourceMapOriginals(file, maps);
@@ -554,13 +591,6 @@ const unavailableSourceMap = (
     sources: [],
     limitation: "Source-map text could not be decoded as UTF-8.",
   };
-};
-
-const flattenSourceMaps = (
-  root: unknown,
-): Readonly<Record<string, unknown>>[] | undefined => {
-  const leaves = flattenSourceMapLeaves(root);
-  return leaves === undefined ? undefined : [...leaves];
 };
 
 const invalidSourceMap = (

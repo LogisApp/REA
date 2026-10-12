@@ -18,6 +18,7 @@ import { z } from "zod";
 
 import { PRODUCT_IDENTITY } from "../identity.js";
 import type { SetupClient } from "./SupportedClients.js";
+import { compareUnicodeCodePoints } from "../domain/unicodeCodePointOrder.js";
 
 export type ClientConfigurationFormat = NonNullable<SetupClient["format"]>;
 export type ClientServersKey = "mcp_servers" | "mcpServers" | "mcp" | "servers";
@@ -63,7 +64,7 @@ const normalizeConfigurationValue = (value: unknown): unknown => {
     return value;
   return Object.fromEntries(
     Object.entries(value)
-      .sort(([left], [right]) => left.localeCompare(right))
+      .sort(([left], [right]) => compareUnicodeCodePoints(left, right))
       .map(([key, nested]) => [key, normalizeConfigurationValue(nested)]),
   );
 };
@@ -103,11 +104,11 @@ const parseDocument = (
   // comments, trailing commas, a BOM, or an empty existing file must be
   // rejected instead of registering into a document Pi cannot load.
   if (format === "pi") return objectSchema.parse(JSON.parse(text));
-  // Hermes stores MCP servers in `mcp_servers` inside a YAML document.
-  if (format === "hermes") return objectSchema.parse(parseYaml(text));
   // An empty file, which some clients create before any server is added,
   // holds no settings to preserve.
   if (isEmptyClientConfigurationText(text)) return {};
+  // Hermes stores MCP servers in `mcp_servers` inside a YAML document.
+  if (format === "hermes") return objectSchema.parse(parseYaml(text));
   const errors: ParseError[] = [];
   // Accept a UTF-8 BOM without shifting diagnostics or editing the original text.
   const jsonText = text.startsWith("\uFEFF") ? ` ${text.slice(1)}` : text;

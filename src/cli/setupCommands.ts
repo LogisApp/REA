@@ -120,11 +120,12 @@ const registerDoctorCommand = (
     }),
     run: ({ options }) =>
       logCliCommand(logger, "doctor", async () => {
-        const [{ runDoctor }, { createSystemDoctorHost }] = await Promise.all([
-          import("../application/Doctor.js"),
-          import("../doctorRuntime.js"),
-        ]);
-        return runDoctor(
+        const [{ runDoctorOwned }, { createSystemDoctorHost }] =
+          await Promise.all([
+            import("../application/Doctor.js"),
+            import("../doctorRuntime.js"),
+          ]);
+        return runDoctorOwned(
           options.target,
           createSystemDoctorHost(environment),
           doctorScope(options),
@@ -263,6 +264,9 @@ const setupRunOptions = (
       ? {
           readinessScope: {
             clients: options.client,
+            ...(options.skillClient.length > 0
+              ? { skillClients: options.skillClient }
+              : {}),
             providers: options.installHopper ? ["hopper"] : [],
             skill: options.skill ?? agentIntegrationSelected,
           },

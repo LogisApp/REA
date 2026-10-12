@@ -352,6 +352,12 @@ Other integrations, including Qwen Code, use `~/.agents/skills`.
 A mixed selection plans each distinct destination. Selecting the skill without a client uses the shared
 directory. Setup leaves existing skill copies in other locations untouched.
 
+`rea setup --skill-client claude_code --yes --json` refreshes and verifies the
+selected skill destination independently of MCP registration selection. The
+final `doctor.scope.skill_clients` records which skill destinations were
+checked; `doctor.scope.clients` continues to describe required registrations.
+An unselected shared skill does not affect a client-only refresh.
+
 `doctor --skill --json` verifies the selected copies against the bundled
 instructions and references. Consumers should use `identity.skill.state`,
 `installed_version`, and `installed_tool_count` for skill readiness. The
@@ -531,6 +537,25 @@ export HOPPER_LAUNCHER_PATH=/absolute/path/to/Hopper
 rea doctor --provider hopper --json
 ```
 
+Hopper startup allows 120,000 ms for launch, initial analysis, and authenticated
+bridge readiness. For large targets, set `REA_HOPPER_STARTUP_TIMEOUT_MS` to a
+decimal integer from 1 to 2,147,483,647 milliseconds in the environment that
+starts REA. CLI and MCP use the same setting; invalid values fail configuration
+validation. An MCP client's own request timeout must also allow enough time.
+
+If macOS denies Apple Events, allow the application that starts REA under
+**System Settings → Privacy & Security → Automation**, then retry. REA releases
+the target reservation when the native helper reports its complete authorization
+rejection and its arguments cannot alter the helper's generated AppleScript.
+Arguments containing quotes, backslashes, or line breaks remain unchanged but
+cannot establish that a failed handoff opened no document. Other failed handoffs
+retain ownership until document closure is confirmed. If a timed-out bridge
+becomes ready later, `close_binary` connects to that run, authenticates its
+identity, and requests document shutdown. After a connection drops, the bridge
+allows 30 seconds for an authenticated cleanup reconnect, then releases Hopper's
+Python execution thread. Expiry does not establish document closure, so REA
+retains unconfirmed ownership. Retry close while the bridge remains available.
+
 If a Linux launcher exists but cannot start, inspect its shared libraries:
 
 ```bash
@@ -542,8 +567,13 @@ need Xvfb, Python 3, X11 and XTEST; approved setup installs those dependencies
 on supported distributions. Add the curl installer's reported executable
 directory, commonly `~/.local/bin`, to your shell `PATH` if needed.
 
-REA starts Hopper when needed. On macOS, its launcher can bring a window or
-first-run dialog forward; choose demo mode or activate your existing license.
+REA starts Hopper when needed. On macOS, complete its demo or license prompt in
+the same user session before the first CLI/MCP operation or unattended job. Open
+Hopper manually if needed; its launcher can also bring the dialog forward.
+If startup reports `Cannot launch Hopper! Connection is invalid.` or waits for
+bridge readiness, check Hopper for a pending demo, license, or loader dialog.
+Complete the dialog and retry. If REA reports `cleanup_incomplete`, follow the
+retained-resource guidance below before reopening the target.
 Hopper serializes analysis requests. Cancelling a wait can leave provider work
 running, which the session reports. Successful decompilation is cached until
 a relevant rename or comment changes it.
@@ -572,6 +602,11 @@ if document closure is unconfirmed, REA retains the backing image and reports
 MCP-exit behavior.
 Startup deadlines report missing bridge readiness and preserve the launcher
 outcome; a successful helper exit does not prove that a loader dialog completed.
+If an owned provider process exits, request failures preserve its observed exit
+code or signal and bounded output in `details.launcher`. An exit can precede
+output-stream closure; `output_closed: false` keeps that uncertainty explicit.
+Later requests retain the known exit instead of reducing it to socket loss.
+An external GUI's helper exit does not establish that the GUI itself exited.
 Cursor navigation returns the observed object start when Hopper snaps an interior
 address; adjacent-object navigation rejects unmapped inputs and document ends.
 Native API text rejects NUL characters and unpaired Unicode surrogates before
@@ -744,6 +779,32 @@ is no fixed per-operation or response-size ceiling. Unresolved computed calls
 remain unknown, reference-kind provenance is preserved, and provider-specific
 pseudocode is never treated as original source or Hopper-equivalent text.
 
+### Missing macOS native decompiler
+
+If `rea doctor --json` reports `native_decompiler` as missing on macOS x64,
+the extracted Ghidra archive may include the decompiler source without the
+macOS executable. For Ghidra 12.1.4, you can build it manually with an existing
+Xcode Command Line Tools installation, `make`, and `bison`:
+
+```bash
+cd "$GHIDRA_INSTALL_DIR/Ghidra/Features/Decompiler/src/decompile/cpp"
+make ghidra_opt
+decompiler_dir="$GHIDRA_INSTALL_DIR/Ghidra/Features/Decompiler/os/mac_x86_64"
+mkdir -p "$decompiler_dir"
+test ! -e "$decompiler_dir/decompile" && test ! -L "$decompiler_dir/decompile" &&
+  install -m 755 ghidra_opt "$decompiler_dir/decompile"
+rea doctor --json
+```
+
+The copy step requires the destination to be absent and preserves an existing
+decompiler. This recipe is specific to macOS x64: the
+[Ghidra 12.1.4 Makefile](https://github.com/NationalSecurityAgency/ghidra/blob/Ghidra_12.1.4_build/Ghidra/Features/Decompiler/src/decompile/cpp/Makefile)
+explicitly selects `-arch x86_64` on Darwin. For other architectures or a Gradle
+build, follow the matching release's
+[native component instructions](https://github.com/NationalSecurityAgency/ghidra/blob/Ghidra_12.1.4_build/GhidraDocs/GettingStarted.md#building-native-components).
+REA accepts the matching executable under either `os/<platform>/` or
+`build/os/<platform>/`; it does not build the component during setup or diagnosis.
+
 ### Ghidra import language and analysis seeds
 
 Ghidra detects the language from the executable header. To set it (for example, Borland C++ PE images):
@@ -764,6 +825,27 @@ export REA_GHIDRA_SEED_FILE=/absolute/path/to/seeds.tsv
 Each line is `address<TAB>kind[<TAB>name]`, where kind is `function`, `code` or `label` (a label needs a name). Addresses are `0x` hex in the default space; `#` lines are comments. A pre-script applies seeds before auto-analysis: functions from the highest address down, then code, then labels. The seed digest is part of the analysis profile, and the session fails if the applied seeds differ. Result limitations report the outcome counts; a seed fails when it overlaps an instruction Ghidra already decoded.
 
 Label seeds can name mapped uninitialized storage such as `.bss`; function and code seeds require initialized bytes.
+
+To skip a named Ghidra auto-analyzer (for example, when default auto-analysis
+stalls in one analyzer on a Swift/Objective-C arm64 Mach-O):
+
+```bash
+export REA_GHIDRA_DISABLED_ANALYZERS="Objective-C Message Analyzer"
+```
+
+The value is a comma-separated list of exact Ghidra analyzer names. A pre-script
+disables each name before auto-analysis, the analysis profile records the
+override in `analyzer_preset` (for example
+`ghidra-default+disabled:Objective-C Message Analyzer`), and a session fails to
+open when its committed profile and the setting differ. A name starts with a
+letter or digit and contains only letters, digits, spaces, periods, underscores,
+and hyphens; at most 32 names are admitted, each at most 120 characters.
+Names must identify analyzers registered for the selected program. Unknown names
+or options that remain enabled abort the headless import before auto-analysis
+and the bridge, so an unsuccessful override cannot produce a session claiming
+that the analyzer was disabled. For Windows PE resource analysis, the exact name
+is `WindowsResourceReference`. Disabling an analyzer skips the facts it would
+have produced.
 
 ### Ghidra heap and CPU controls
 
@@ -826,8 +908,12 @@ verification workflows.
 
 Unexpected request failures retain their original internal cause. CLI and MCP
 errors expose Error names, messages, and available codes under
-`details.diagnostics.failure_cause`; other rejection values retain their
-primitive value or an explicit type. Shutdown warnings include the failure
+`details.diagnostics.failure_cause`, including bounded nested causes and explicit
+truncation markers. Darwin ownership-helper compilation failures also retain
+the compiler outcome, exit code or signal, and bounded stderr; a timed-out
+compiler remains distinguishable from a compiler that exited with an error.
+Other rejection values retain their primitive value or an explicit type.
+Shutdown warnings include the failure
 kind, message, and diagnostics, while process and temporary-project cleanup
 continues. These messages redact known bridge authentication tokens and
 preserve local paths and other analysis context.

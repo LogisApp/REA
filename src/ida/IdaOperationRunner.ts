@@ -10,6 +10,8 @@ import {
   functionInstructionWindowSchema,
 } from "../domain/hopperValues.js";
 import type { JsonValue } from "../domain/jsonValue.js";
+import type { RelationshipCoverage } from "../domain/relationshipCoverage.js";
+import { readCallGraphCallees, unavailableCallGraph } from "./IdaCallGraph.js";
 import type { IdaMcpConnection } from "./IdaMcpConnection.js";
 import type { IdaOperation } from "./IdaProviderCapabilities.js";
 import { IDA_LIMITATIONS } from "./IdaProviderCapabilities.js";
@@ -51,6 +53,11 @@ const identity = (fn: IdaFunction) => ({
   classification: null,
   body: unknownBody,
 });
+/** The only lookup answers upstream reports for a name or address that is not a function. */
+const MISSING_PROCEDURE_ANSWERS: ReadonlySet<string> = new Set([
+  "Not found",
+  "Not a function",
+]);
 const lines = (asm: IdaDisassembly) =>
   asm.lines.map(({ address, instruction }) => `${address}: ${instruction}`);
 
@@ -59,23 +66,31 @@ export class IdaOperationRunner {
   readonly raw: IdaRawObservation[] = [];
   readonly locations: EvidenceLocation[] = [];
   readonly limitations: string[] = [];
+  relationshipCoverage: RelationshipCoverage | undefined;
   constructor(
     private readonly connection: IdaMcpConnection,
     private readonly protocol: "legacy" | "modern",
     private readonly database?: string,
-    private readonly signal?: AbortSignal,
+    private readonly options: {
+      readonly signal?: AbortSignal | undefined;
+      readonly selectorOrigin?: "provider" | undefined;
+      /** False when the loaded processor may not be x86, so `callees` cannot be trusted alone. */
+      readonly x86Only?: boolean;
+      /** False when the upstream server does not advertise `callgraph`. */
+      readonly callGraphAvailable?: boolean;
+    } = {},
   ) {}
 
   async call(
     tool: string,
     args: Readonly<Record<string, JsonValue>>,
   ): Promise<JsonValue> {
-    if (this.signal?.aborted) throw new AnalysisCancelledError(tool);
+    if (this.options.signal?.aborted) throw new AnalysisCancelledError(tool);
     const scoped =
       this.database === undefined ? args : { ...args, database: this.database };
     const result = await this.connection.call(tool, scoped);
     this.raw.push({ tool, arguments: scoped, result });
-    if (this.signal?.aborted) throw new AnalysisCancelledError(tool);
+    if (this.options.signal?.aborted) throw new AnalysisCancelledError(tool);
     return result;
   }
 
@@ -106,11 +121,42 @@ export class IdaOperationRunner {
     return result;
   }
 
-  async resolve(query: string): Promise<IdaFunction> {
+  /**
+   * Resolves a procedure. When `requestedBy` names the caller's operation, an
+   * upstream "not found" or "not a function" answer is reported as invalid
+   * input; every other failed lookup stays a producer fault. `run()` passes
+   * `requestedBy` only for caller-supplied selectors. Provider-derived
+   * selectors, such as the addresses composed workflows revisit, and the
+   * callee resolution inside `relationships()` pass none, because those
+   * addresses were reported by IDA itself.
+   */
+  async resolve(query: string, requestedBy?: string): Promise<IdaFunction> {
     if (this.protocol === "modern") {
       const item = modernLookupSchema.parse(
         await this.call("lookup_funcs", { queries: [query] }),
       )[0];
+      if (
+        requestedBy !== undefined &&
+        item?.query === query &&
+        item.fn === null &&
+        item.error !== null &&
+        MISSING_PROCEDURE_ANSWERS.has(item.error)
+      )
+        throw new AnalysisInputError(
+          requestedBy,
+          {
+            cause: new AnalysisProtocolError(
+              `IDA function lookup failed for ${query}: ${item.error}`,
+            ),
+          },
+          [
+            {
+              path: [],
+              reason: "invalid_value",
+              message: `IDA could not resolve procedure ${JSON.stringify(query)}: ${item.error}.`,
+            },
+          ],
+        );
       if (item?.fn == null || item.error !== null)
         throw new AnalysisProtocolError(
           `IDA function lookup failed for ${query}: ${item?.error ?? "missing function"}`,
@@ -136,6 +182,34 @@ export class IdaOperationRunner {
         "IDA function identity changed during lookup.",
       );
     return entry;
+  }
+
+  /** True only for modern callee reads on targets not proven x86-only; x86 reads never reach the graph code. */
+  private readsCallGraph(direction: "callers" | "callees"): boolean {
+    return (
+      this.protocol === "modern" &&
+      direction === "callees" &&
+      this.options.x86Only === false
+    );
+  }
+
+  /** Add processor-neutral function callees on targets where upstream `callees` is unsound. */
+  private async addCallGraphCallees(
+    fn: IdaFunction,
+    result: Map<string, ReturnType<typeof identity>>,
+  ): Promise<void> {
+    const graph =
+      this.options.callGraphAvailable === false
+        ? unavailableCallGraph("the upstream server does not advertise it")
+        : await readCallGraphCallees(
+            (tool, args) => this.call(tool, args),
+            fn.address,
+          );
+    this.relationshipCoverage = graph.coverage;
+    this.limitations.push(...graph.limitations);
+    for (const callee of graph.callees)
+      if (!result.has(callee.address))
+        result.set(callee.address, identity({ ...callee, size: "unknown" }));
   }
 
   async strings(): Promise<{ address: string; value: string }[]> {
@@ -273,6 +347,10 @@ export class IdaOperationRunner {
   ): Promise<ReturnType<typeof identity>[]> {
     const queries: string[] = [];
     const result = new Map<string, ReturnType<typeof identity>>();
+    if (this.readsCallGraph(direction)) {
+      await this.addCallGraphCallees(fn, result);
+      return [...result.values()];
+    }
     if (this.protocol === "legacy") {
       const value = await this.call(
         direction === "callers" ? "get_callers" : "get_callees",
@@ -291,6 +369,11 @@ export class IdaOperationRunner {
       this.limitations.push(
         "Modern upstream xrefs classify references as code or data, without proving call edges. Direct callers are unavailable in this profile.",
       );
+      this.relationshipCoverage = {
+        status: "unknown",
+        reason:
+          "Modern upstream xrefs do not establish direct caller relationships.",
+      };
       return [];
     } else {
       const page = modernCalleesSchema.parse(
@@ -304,6 +387,15 @@ export class IdaOperationRunner {
         this.limitations.push(
           "Upstream callees capped results at 500; additional callees remain unknown.",
         );
+      this.relationshipCoverage =
+        page.more === true
+          ? {
+              status: "partial",
+              limitations: [
+                "Upstream callees capped results at 500; additional callees remain unknown.",
+              ],
+            }
+          : { status: "complete" };
       for (const item of page.callees) {
         if ("type" in item && item.type === "external")
           result.set(
@@ -317,6 +409,11 @@ export class IdaOperationRunner {
       const resolved = identity(await this.resolve(query));
       result.set(resolved.address, resolved);
     }
+    if (this.relationshipCoverage === undefined)
+      this.relationshipCoverage = {
+        status: "unknown",
+        reason: "The legacy relationship response does not report coverage.",
+      };
     return [...result.values()];
   }
 
@@ -351,6 +448,7 @@ export class IdaOperationRunner {
     }
     const fn = await this.resolve(
       z.string().min(1).parse(parameters.procedure),
+      this.options.selectorOrigin === "provider" ? undefined : operation,
     );
     this.locations.push({ kind: "address", address: fn.address });
     switch (operation) {

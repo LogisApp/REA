@@ -88,6 +88,9 @@ export const parseConfig = (
     ...(env.REA_GHIDRA_SEED_FILE === undefined
       ? {}
       : { ghidraSeedFile: env.REA_GHIDRA_SEED_FILE }),
+    ...(env.REA_GHIDRA_DISABLED_ANALYZERS === undefined
+      ? {}
+      : { ghidraDisabledAnalyzers: env.REA_GHIDRA_DISABLED_ANALYZERS }),
     ...(env.REA_GHIDRA_NATIVEAOT_JAR === undefined
       ? {}
       : { ghidraNativeAotJar: env.REA_GHIDRA_NATIVEAOT_JAR }),
@@ -98,6 +101,7 @@ export const parseConfig = (
         process.platform,
         homeDirectoryFromEnvironment(environment, process.platform),
       ),
+    hopperStartupTimeoutMs: env.REA_HOPPER_STARTUP_TIMEOUT_MS,
     hopperTargetPath: env.HOPPER_TARGET_PATH,
     hopperTargetKind: env.HOPPER_TARGET_KIND,
     hopperLoaderArgs: loaderArgs.value,

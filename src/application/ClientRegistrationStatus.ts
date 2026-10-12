@@ -25,6 +25,8 @@ import {
   supportedClients,
 } from "./SupportedClients.js";
 import type { SetupClient } from "./SupportedClients.js";
+import { compareUnicodeCodePoints } from "../domain/unicodeCodePointOrder.js";
+import type { ArtifactResourceScope } from "../artifacts/ArtifactResourceScope.js";
 
 interface ClientRegistrationStatusBase {
   readonly client: string;
@@ -77,6 +79,7 @@ export const readClientRegistrationStatuses = async (
   options: {
     readonly platform?: NodeJS.Platform;
     readonly environment?: NodeJS.ProcessEnv;
+    readonly resources?: ArtifactResourceScope;
   } = {},
 ): Promise<readonly ClientRegistrationStatus[]> => {
   const statuses: ClientRegistrationStatus[] = [];
@@ -109,7 +112,10 @@ export const readClientRegistrationStatuses = async (
       continue;
     }
     try {
-      const files = await readClientConfigurationFiles(client);
+      const files = await readClientConfigurationFiles(
+        client,
+        options.resources,
+      );
       if (!files.ok) {
         statuses.push({
           client: client.name,
@@ -127,7 +133,12 @@ export const readClientRegistrationStatuses = async (
         );
         continue;
       }
-      const policy = await readClientPolicyBlock(client, parsed);
+      const policy = await readClientPolicyBlock(
+        client,
+        parsed,
+        undefined,
+        options.resources,
+      );
       if (!policy.ok) {
         statuses.push({
           client: client.name,
@@ -184,7 +195,7 @@ export const readClientRegistrationStatuses = async (
     }
   }
   return statuses.sort((left, right) =>
-    left.client.localeCompare(right.client),
+    compareUnicodeCodePoints(left.client, right.client),
   );
 };
 
