@@ -72,6 +72,7 @@ import type { FirmwareAnalysisPort } from "../application/firmware/FirmwareAnaly
 import { createFirmwareAnalysisProvider } from "../composition/firmware.js";
 import { registerAndroidTools } from "./registerAndroidTools.js";
 import { registerApktoolTools } from "./registerApktoolTools.js";
+import { registerFlutterTools } from "./registerFlutterTools.js";
 import { registerJebTools } from "./registerJebTools.js";
 import { registerAdbTools } from "./registerAdbTools.js";
 import { AndroidAnalysisService } from "../application/android/AndroidAnalysisService.js";
@@ -79,8 +80,11 @@ import { JebAnalysisService } from "../application/jeb/JebAnalysisService.js";
 import type { AndroidAnalysisPort } from "../application/android/AndroidAnalysisPort.js";
 import type { ApktoolResourceAnalysisPort } from "../application/apktool/ApktoolResourceAnalysisPort.js";
 import { ApktoolResourceAnalysisService } from "../application/apktool/ApktoolResourceAnalysisService.js";
+import type { FlutterBuildAnalysisPort } from "../application/flutter/FlutterBuildAnalysisPort.js";
+import { FlutterBuildAnalysisService } from "../application/flutter/FlutterBuildAnalysisService.js";
 import { createAndroidAnalysisProvider } from "../composition/android.js";
 import { createApktoolResourceAnalysisProvider } from "../composition/apktool.js";
+import { createFlutterBuildAnalysisProvider } from "../composition/flutter.js";
 import type { JebAnalysisPort } from "../application/jeb/JebAnalysisPort.js";
 import { createJebAnalysisProvider } from "../composition/jeb.js";
 import type { AdbDeviceAnalysisPort } from "../application/adb/AdbDeviceAnalysisPort.js";
@@ -123,6 +127,7 @@ export interface CreateServerOptions {
   readonly webNetworkCapture?: WebNetworkCaptureService;
   readonly androidAnalysis?: AndroidAnalysisPort;
   readonly apktoolAnalysis?: ApktoolResourceAnalysisPort;
+  readonly flutterAnalysis?: FlutterBuildAnalysisPort;
   readonly jebAnalysis?: JebAnalysisPort;
   readonly adbDeviceAnalysis?: AdbDeviceAnalysisPort;
   readonly browserObservation?: BrowserObservationPort;
@@ -248,6 +253,8 @@ export const createServer = (
     options.androidAnalysis ?? createAndroidAnalysisProvider(environment);
   const wasmArtifact =
     options.wasmArtifact ?? createWasmArtifactService(environment);
+  const flutter =
+    options.flutterAnalysis ?? createFlutterBuildAnalysisProvider(environment);
   const apktool =
     options.apktoolAnalysis ??
     createApktoolResourceAnalysisProvider(environment);
@@ -262,6 +269,7 @@ export const createServer = (
       apktool.close(),
       jeb.close(),
       adbDevice.close(),
+      flutter.close(),
       evmInterface.close(),
       webSourceLocation.close(),
       webModuleTrace.close(),
@@ -336,6 +344,13 @@ export const createServer = (
   registerAdbTools(
     server,
     new AdbDeviceAnalysisService(adbDevice),
+    toolLogger,
+    recordEvidence,
+    analysisAdmission,
+  );
+  registerFlutterTools(
+    server,
+    new FlutterBuildAnalysisService(flutter),
     toolLogger,
     recordEvidence,
     analysisAdmission,
